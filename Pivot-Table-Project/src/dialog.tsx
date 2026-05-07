@@ -267,6 +267,11 @@ function DialogApp() {
           tableau.extensions.settings.get('displaySettings'),
           DEFAULT_DISPLAY
         );
+        console.log('savedDisplay from settings:', savedDisplay);
+        console.log(
+            'raw displaySettings string:',
+            tableau.extensions.settings.get('displaySettings')
+            );
         const savedShowAllDimensions =
           tableau.extensions.settings.get('showAllDimensionFields') === 'true';
         const savedShowAllMeasures =

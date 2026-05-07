@@ -355,9 +355,23 @@ export default function App() {
     const popupUrl = `${window.location.origin}/dialog.html`;
 
     try {
-      await tableau.extensions.ui.displayDialogAsync(popupUrl, '', {
+      const result = await tableau.extensions.ui.displayDialogAsync(popupUrl, '', {
         height: 700,
         width: 900
+      });
+
+      // Re-read settings directly after dialog closes
+      const latestDisplay = parseSavedObject<DisplaySettings>(
+        tableau.extensions.settings.get('displaySettings'),
+        DEFAULT_DISPLAY
+      );
+
+      setDisplaySettings({
+        showTableTitle:
+          latestDisplay.showTableTitle ?? DEFAULT_DISPLAY.showTableTitle,
+        tableTitle: latestDisplay.tableTitle ?? DEFAULT_DISPLAY.tableTitle,
+        hierarchyHeader:
+          latestDisplay.hierarchyHeader ?? DEFAULT_DISPLAY.hierarchyHeader
       });
 
       await loadWorksheetData(false);
@@ -836,15 +850,22 @@ export default function App() {
                         <button
                           onClick={() => toggleNode(node.id)}
                           style={{
-                            width: '24px',
-                            height: '24px',
-                            minWidth: '24px',
+                            width: '16px',
+                            height: '16px',
+                            minWidth: '16px',
                             marginRight: '8px',
-                            border: '1px solid #aaa',
+                            border: '1px solid #999',
                             background: '#fff',
                             cursor: 'pointer',
-                            fontWeight: 'bold',
-                            color: '#333'
+                            fontWeight: 700,
+                            fontSize: '12px',
+                            lineHeight: '12px',
+                            padding: 0,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: '#333',
+                            borderRadius: '2px'
                           }}
                         >
                           {expandedNodes[node.id] ? '-' : '+'}
