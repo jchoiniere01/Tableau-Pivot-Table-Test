@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 declare const tableau: any;
 
@@ -54,6 +54,12 @@ type LayoutSettings = {
   measureWidths: Record<string, number>;
 };
 
+type DisplaySettings = {
+  showTableTitle: boolean;
+  tableTitle: string;
+  hierarchyHeader: string;
+};
+
 const DEFAULT_STYLES: StyleSettings = {
   dimensionHeaderBg: '#f3f3f3',
   dimensionHeaderText: '#111111',
@@ -80,6 +86,12 @@ const DEFAULT_LAYOUT: LayoutSettings = {
   hierarchyWidth: 320,
   defaultMeasureWidth: 140,
   measureWidths: {}
+};
+
+const DEFAULT_DISPLAY: DisplaySettings = {
+  showTableTitle: true,
+  tableTitle: 'Pivot Table',
+  hierarchyHeader: 'Hierarchy'
 };
 
 const MIN_HIERARCHY_WIDTH = 160;
@@ -146,6 +158,7 @@ export default function App() {
   const [styleSettings, setStyleSettings] = useState<StyleSettings>(DEFAULT_STYLES);
   const [measureFormats, setMeasureFormats] = useState<MeasureFormatMap>({});
   const [layoutSettings, setLayoutSettings] = useState<LayoutSettings>(DEFAULT_LAYOUT);
+  const [displaySettings, setDisplaySettings] = useState<DisplaySettings>(DEFAULT_DISPLAY);
   const [showTotals, setShowTotals] = useState(false);
   const [treeRoots, setTreeRoots] = useState<TreeNode[]>([]);
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
@@ -153,7 +166,6 @@ export default function App() {
 
   const unregisterHandlersRef = useRef<(() => void)[]>([]);
   const refreshTimerRef = useRef<number | null>(null);
-  const selectedWorksheetRef = useRef<string>('');
 
   function clearEventListeners() {
     unregisterHandlersRef.current.forEach((unregister) => {
@@ -182,7 +194,7 @@ export default function App() {
     };
   }
 
-  function getMeasureWidth(field: string): number {
+  function getSavedMeasureWidth(field: string): number {
     return layoutSettings.measureWidths[field] || layoutSettings.defaultMeasureWidth;
   }
 
@@ -339,6 +351,26 @@ export default function App() {
     }
   }
 
+  async function configure() {
+    const popupUrl = `${window.location.origin}/dialog.html`;
+
+    try {
+      await tableau.extensions.ui.displayDialogAsync(popupUrl, '', {
+        height: 700,
+        width: 900
+      });
+
+      await loadWorksheetData(false);
+    } catch (error: any) {
+      if (error?.errorCode === tableau.ErrorCodes.DialogClosedByUser) {
+        return;
+      }
+
+      console.error('Configure dialog error:', error);
+      setMessage(`Configuration error: ${error?.message || error}`);
+    }
+  }
+
   function startResize(
     event: React.MouseEvent<HTMLDivElement>,
     type: 'hierarchy' | 'measure',
@@ -351,7 +383,7 @@ export default function App() {
     const startWidth =
       type === 'hierarchy'
         ? layoutSettings.hierarchyWidth
-        : getMeasureWidth(field || '');
+        : getSavedMeasureWidth(field || '');
 
     setIsResizing(true);
     document.body.style.cursor = 'col-resize';
@@ -467,10 +499,12 @@ export default function App() {
       tableau.extensions.settings.get('layoutSettings'),
       DEFAULT_LAYOUT
     );
+    const savedDisplay = parseSavedObject<DisplaySettings>(
+      tableau.extensions.settings.get('displaySettings'),
+      DEFAULT_DISPLAY
+    );
     const savedShowTotals =
       tableau.extensions.settings.get('showTotals') === 'true';
-
-    selectedWorksheetRef.current = savedWorksheet || '';
 
     setDimensionFields(savedDimensions);
     setMeasureFields(savedMeasures);
@@ -482,6 +516,13 @@ export default function App() {
       defaultMeasureWidth:
         savedLayout.defaultMeasureWidth || DEFAULT_LAYOUT.defaultMeasureWidth,
       measureWidths: savedLayout.measureWidths || {}
+    });
+    setDisplaySettings({
+      showTableTitle:
+        savedDisplay.showTableTitle ?? DEFAULT_DISPLAY.showTableTitle,
+      tableTitle: savedDisplay.tableTitle ?? DEFAULT_DISPLAY.tableTitle,
+      hierarchyHeader:
+        savedDisplay.hierarchyHeader ?? DEFAULT_DISPLAY.hierarchyHeader
     });
     setShowTotals(savedShowTotals);
 
@@ -530,6 +571,17 @@ export default function App() {
       const roots = buildTree(allRows, savedDimensions, savedMeasures);
 
       setTreeRoots(roots);
+
+      setExpandedNodes((prev) => {
+        const next = { ...prev };
+        roots.forEach((node) => {
+          if (next[node.id] === undefined) {
+            next[node.id] = true;
+          }
+        });
+        return next;
+      });
+
       await registerWorksheetListeners(worksheet);
 
       if (!fromAutoRefresh) {
@@ -548,7 +600,7 @@ export default function App() {
           return;
         }
 
-        await tableau.extensions.initializeAsync();
+        await tableau.extensions.initializeAsync({ configure });
         await loadWorksheetData(false);
       } catch (error: any) {
         setMessage(`Error: ${error?.message || error}`);
@@ -567,12 +619,41 @@ export default function App() {
     };
   }, []);
 
-  const visibleNodes = flattenVisibleNodes(treeRoots, expandedNodes);
+  const visibleNodes = useMemo(
+    () => flattenVisibleNodes(treeRoots, expandedNodes),
+    [treeRoots, expandedNodes]
+  );
+
+  const hierarchyWidth = Math.max(MIN_HIERARCHY_WIDTH, layoutSettings.hierarchyWidth);
+
+  const measureColumnWidths = useMemo(() => {
+    const result: Record<string, number> = {};
+    measureFields.forEach((field) => {
+      result[field] = Math.max(MIN_MEASURE_WIDTH, getSavedMeasureWidth(field));
+    });
+    return result;
+  }, [measureFields, layoutSettings]);
+
+  const totalColumnWidth =
+    showTotals && measureFields[0]
+      ? Math.max(MIN_MEASURE_WIDTH, getSavedMeasureWidth(measureFields[0]))
+      : 0;
 
   if (message && visibleNodes.length === 0) {
     return (
-      <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
-        <h1 style={{ marginTop: 0, marginBottom: '12px' }}>Pivot Table</h1>
+      <div
+        style={{
+          width: '100%',
+          padding: '20px',
+          boxSizing: 'border-box',
+          fontFamily: 'Arial, sans-serif'
+        }}
+      >
+        {displaySettings.showTableTitle && (
+          <h1 style={{ marginTop: 0, marginBottom: '12px' }}>
+            {displaySettings.tableTitle}
+          </h1>
+        )}
         <div
           style={{
             border: '1px solid #ddd',
@@ -591,19 +672,32 @@ export default function App() {
   return (
     <div
       style={{
+        width: '100%',
         padding: '20px',
+        boxSizing: 'border-box',
         fontFamily: 'Arial, sans-serif',
-        cursor: isResizing ? 'col-resize' : 'default'
+        cursor: isResizing ? 'col-resize' : 'default',
+        overflow: 'hidden'
       }}
     >
-      <h1 style={{ marginTop: 0, marginBottom: '16px' }}>Pivot Table</h1>
+      {displaySettings.showTableTitle && (
+        <h1 style={{ marginTop: 0, marginBottom: '16px' }}>
+          {displaySettings.tableTitle}
+        </h1>
+      )}
 
-      <div style={{ overflowX: 'auto' }}>
+      <div
+        style={{
+          width: '100%',
+          overflowX: 'auto',
+          overflowY: 'hidden'
+        }}
+      >
         <table
           style={{
             borderCollapse: 'collapse',
-            width: '100%',
-            minWidth: '850px',
+            width: 'max-content',
+            minWidth: '100%',
             tableLayout: 'fixed'
           }}
         >
@@ -617,29 +711,38 @@ export default function App() {
                   background: styleSettings.dimensionHeaderBg,
                   color: styleSettings.dimensionHeaderText,
                   textAlign: 'left',
-                  width: `${layoutSettings.hierarchyWidth}px`,
-                  minWidth: `${layoutSettings.hierarchyWidth}px`,
-                  maxWidth: `${layoutSettings.hierarchyWidth}px`
+                  width: `${hierarchyWidth}px`,
+                  boxSizing: 'border-box'
                 }}
               >
-                <div style={{ paddingRight: '10px' }}>Hierarchy</div>
+                <div
+                  style={{
+                    paddingRight: '12px',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis'
+                  }}
+                >
+                  {displaySettings.hierarchyHeader}
+                </div>
                 <div
                   onMouseDown={(e) => startResize(e, 'hierarchy')}
                   title="Drag to resize"
                   style={{
                     position: 'absolute',
                     top: 0,
-                    right: -3,
+                    right: 0,
                     width: '8px',
                     height: '100%',
                     cursor: 'col-resize',
-                    zIndex: 2
+                    zIndex: 2,
+                    background: 'transparent'
                   }}
                 />
               </th>
 
               {measureFields.map((field) => {
-                const width = getMeasureWidth(field);
+                const width = measureColumnWidths[field];
 
                 return (
                   <th
@@ -652,22 +755,31 @@ export default function App() {
                       color: styleSettings.measureHeaderText,
                       textAlign: getMeasureFormat(field).alignment,
                       width: `${width}px`,
-                      minWidth: `${width}px`,
-                      maxWidth: `${width}px`
+                      boxSizing: 'border-box'
                     }}
                   >
-                    <div style={{ paddingRight: '10px' }}>{getDisplayLabel(field)}</div>
+                    <div
+                      style={{
+                        paddingRight: '12px',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis'
+                      }}
+                    >
+                      {getDisplayLabel(field)}
+                    </div>
                     <div
                       onMouseDown={(e) => startResize(e, 'measure', field)}
                       title="Drag to resize"
                       style={{
                         position: 'absolute',
                         top: 0,
-                        right: -3,
+                        right: 0,
                         width: '8px',
                         height: '100%',
                         cursor: 'col-resize',
-                        zIndex: 2
+                        zIndex: 2,
+                        background: 'transparent'
                       }}
                     />
                   </th>
@@ -682,8 +794,11 @@ export default function App() {
                     background: styleSettings.totalBg,
                     color: styleSettings.totalText,
                     textAlign: getTotalAlignment(),
-                    width: `${getMeasureWidth(measureFields[0] || '')}px`,
-                    minWidth: `${getMeasureWidth(measureFields[0] || '')}px`
+                    width: `${totalColumnWidth}px`,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    boxSizing: 'border-box'
                   }}
                 >
                   Total
@@ -703,10 +818,9 @@ export default function App() {
                       padding: '8px',
                       color: levelStyles.textColor,
                       background: styleSettings.dimensionValueBg,
-                      width: `${layoutSettings.hierarchyWidth}px`,
-                      minWidth: `${layoutSettings.hierarchyWidth}px`,
-                      maxWidth: `${layoutSettings.hierarchyWidth}px`,
-                      overflow: 'hidden'
+                      width: `${hierarchyWidth}px`,
+                      overflow: 'hidden',
+                      boxSizing: 'border-box'
                     }}
                   >
                     <div
@@ -714,7 +828,8 @@ export default function App() {
                         display: 'flex',
                         alignItems: 'center',
                         paddingLeft: `${node.level * 24}px`,
-                        overflow: 'hidden'
+                        overflow: 'hidden',
+                        minWidth: 0
                       }}
                     >
                       {node.hasChildren ? (
@@ -738,7 +853,7 @@ export default function App() {
                         <span style={{ display: 'inline-block', width: '32px', minWidth: '32px' }} />
                       )}
 
-                      <div style={{ overflow: 'hidden' }}>
+                      <div style={{ overflow: 'hidden', minWidth: 0 }}>
                         <div
                           style={{
                             fontWeight: levelStyles.hierarchyWeight,
@@ -755,7 +870,7 @@ export default function App() {
                   </td>
 
                   {measureFields.map((field) => {
-                    const width = getMeasureWidth(field);
+                    const width = measureColumnWidths[field];
 
                     return (
                       <td
@@ -768,11 +883,10 @@ export default function App() {
                           color: styleSettings.measureValueText,
                           background: styleSettings.measureValueBg,
                           width: `${width}px`,
-                          minWidth: `${width}px`,
-                          maxWidth: `${width}px`,
                           whiteSpace: 'nowrap',
                           overflow: 'hidden',
-                          textOverflow: 'ellipsis'
+                          textOverflow: 'ellipsis',
+                          boxSizing: 'border-box'
                         }}
                       >
                         {formatMeasureValue(field, node.measures[field] ?? 0)}
@@ -792,11 +906,11 @@ export default function App() {
                             : levelStyles.measureWeight + 100,
                         color: styleSettings.totalText,
                         background: styleSettings.totalBg,
-                        width: `${getMeasureWidth(measureFields[0] || '')}px`,
-                        minWidth: `${getMeasureWidth(measureFields[0] || '')}px`,
+                        width: `${totalColumnWidth}px`,
                         whiteSpace: 'nowrap',
                         overflow: 'hidden',
-                        textOverflow: 'ellipsis'
+                        textOverflow: 'ellipsis',
+                        boxSizing: 'border-box'
                       }}
                     >
                       {formatMeasureValue(

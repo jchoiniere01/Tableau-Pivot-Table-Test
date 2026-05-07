@@ -40,6 +40,12 @@ type LayoutSettings = {
   measureWidths: Record<string, number>;
 };
 
+type DisplaySettings = {
+  showTableTitle: boolean;
+  tableTitle: string;
+  hierarchyHeader: string;
+};
+
 const DEFAULT_STYLES: StyleSettings = {
   dimensionHeaderBg: '#f3f3f3',
   dimensionHeaderText: '#111111',
@@ -68,6 +74,12 @@ const DEFAULT_LAYOUT: LayoutSettings = {
   measureWidths: {}
 };
 
+const DEFAULT_DISPLAY: DisplaySettings = {
+  showTableTitle: true,
+  tableTitle: 'Pivot Table',
+  hierarchyHeader: 'Hierarchy'
+};
+
 function DialogApp() {
   const [status, setStatus] = useState('Starting dialog...');
   const [worksheets, setWorksheets] = useState<string[]>([]);
@@ -86,6 +98,7 @@ function DialogApp() {
   const [columnsFound, setColumnsFound] = useState<string[]>([]);
   const [previewRows, setPreviewRows] = useState<PreviewRow[]>([]);
   const [layoutSettings, setLayoutSettings] = useState<LayoutSettings>(DEFAULT_LAYOUT);
+  const [displaySettings, setDisplaySettings] = useState<DisplaySettings>(DEFAULT_DISPLAY);
 
   const dimensionMenuRef = useRef<HTMLDivElement | null>(null);
   const measureMenuRef = useRef<HTMLDivElement | null>(null);
@@ -250,6 +263,10 @@ function DialogApp() {
           tableau.extensions.settings.get('layoutSettings'),
           DEFAULT_LAYOUT
         );
+        const savedDisplay = parseSavedObject<DisplaySettings>(
+          tableau.extensions.settings.get('displaySettings'),
+          DEFAULT_DISPLAY
+        );
         const savedShowAllDimensions =
           tableau.extensions.settings.get('showAllDimensionFields') === 'true';
         const savedShowAllMeasures =
@@ -270,6 +287,13 @@ function DialogApp() {
           defaultMeasureWidth:
             savedLayout.defaultMeasureWidth || DEFAULT_LAYOUT.defaultMeasureWidth,
           measureWidths: savedLayout.measureWidths || {}
+        });
+        setDisplaySettings({
+          showTableTitle:
+            savedDisplay.showTableTitle ?? DEFAULT_DISPLAY.showTableTitle,
+          tableTitle: savedDisplay.tableTitle ?? DEFAULT_DISPLAY.tableTitle,
+          hierarchyHeader:
+            savedDisplay.hierarchyHeader ?? DEFAULT_DISPLAY.hierarchyHeader
         });
         setShowAllDimensionFields(savedShowAllDimensions);
         setShowAllMeasureFields(savedShowAllMeasures);
@@ -351,6 +375,16 @@ function DialogApp() {
         ...prev.measureWidths,
         [field]: Math.max(80, value || prev.defaultMeasureWidth || DEFAULT_LAYOUT.defaultMeasureWidth)
       }
+    }));
+  }
+
+  function updateDisplaySetting<K extends keyof DisplaySettings>(
+    key: K,
+    value: DisplaySettings[K]
+  ) {
+    setDisplaySettings((prev) => ({
+      ...prev,
+      [key]: value
     }));
   }
 
@@ -466,6 +500,7 @@ function DialogApp() {
       tableau.extensions.settings.set('styleSettings', JSON.stringify(styleSettings));
       tableau.extensions.settings.set('measureFormats', JSON.stringify(measureFormats));
       tableau.extensions.settings.set('layoutSettings', JSON.stringify(layoutSettings));
+      tableau.extensions.settings.set('displaySettings', JSON.stringify(displaySettings));
       tableau.extensions.settings.set('showAllDimensionFields', String(showAllDimensionFields));
       tableau.extensions.settings.set('showAllMeasureFields', String(showAllMeasureFields));
       tableau.extensions.settings.set('showTotals', String(showTotals));
@@ -592,6 +627,49 @@ function DialogApp() {
             </option>
           ))}
         </select>
+      </div>
+
+      <div style={{ marginBottom: '22px' }}>
+        <label>Display Text</label>
+        <div style={{ ...sectionBox, marginTop: '8px' }}>
+          <div style={{ marginBottom: '12px' }}>
+            <label>
+              <input
+                type="checkbox"
+                checked={displaySettings.showTableTitle}
+                onChange={(e) =>
+                  updateDisplaySetting('showTableTitle', e.target.checked)
+                }
+                style={{ marginRight: '8px' }}
+              />
+              Show table title
+            </label>
+          </div>
+
+          <div style={{ marginBottom: '12px' }}>
+            <div style={{ marginBottom: '6px' }}>Table title</div>
+            <input
+              type="text"
+              value={displaySettings.tableTitle}
+              onChange={(e) =>
+                updateDisplaySetting('tableTitle', e.target.value)
+              }
+              style={{ width: '320px', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
+          </div>
+
+          <div>
+            <div style={{ marginBottom: '6px' }}>Hierarchy header</div>
+            <input
+              type="text"
+              value={displaySettings.hierarchyHeader}
+              onChange={(e) =>
+                updateDisplaySetting('hierarchyHeader', e.target.value)
+              }
+              style={{ width: '320px', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
+          </div>
+        </div>
       </div>
 
       <div style={{ marginBottom: '22px' }}>
