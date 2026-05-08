@@ -18,8 +18,6 @@ type StyleSettings = {
   measureHeaderText: string;
   measureValueBg: string;
   measureValueText: string;
-  totalBg: string;
-  totalText: string;
 };
 
 type MeasureFormat = {
@@ -54,9 +52,7 @@ const DEFAULT_STYLES: StyleSettings = {
   measureHeaderBg: '#f3f3f3',
   measureHeaderText: '#111111',
   measureValueBg: '#ffffff',
-  measureValueText: '#111111',
-  totalBg: '#f9f9f9',
-  totalText: '#111111'
+  measureValueText: '#111111'
 };
 
 const DEFAULT_MEASURE_FORMAT: MeasureFormat = {
@@ -91,7 +87,6 @@ function DialogApp() {
   const [measureMenuOpen, setMeasureMenuOpen] = useState(false);
   const [showAllDimensionFields, setShowAllDimensionFields] = useState(false);
   const [showAllMeasureFields, setShowAllMeasureFields] = useState(false);
-  const [showTotals, setShowTotals] = useState(false);
   const [fieldLabels, setFieldLabels] = useState<Record<string, string>>({});
   const [styleSettings, setStyleSettings] = useState<StyleSettings>(DEFAULT_STYLES);
   const [measureFormats, setMeasureFormats] = useState<MeasureFormatMap>({});
@@ -267,17 +262,10 @@ function DialogApp() {
           tableau.extensions.settings.get('displaySettings'),
           DEFAULT_DISPLAY
         );
-        console.log('savedDisplay from settings:', savedDisplay);
-        console.log(
-            'raw displaySettings string:',
-            tableau.extensions.settings.get('displaySettings')
-            );
         const savedShowAllDimensions =
           tableau.extensions.settings.get('showAllDimensionFields') === 'true';
         const savedShowAllMeasures =
           tableau.extensions.settings.get('showAllMeasureFields') === 'true';
-        const savedShowTotals =
-          tableau.extensions.settings.get('showTotals') === 'true';
 
         const firstWorksheet = savedWorksheet || sheetNames[0] || '';
 
@@ -302,7 +290,6 @@ function DialogApp() {
         });
         setShowAllDimensionFields(savedShowAllDimensions);
         setShowAllMeasureFields(savedShowAllMeasures);
-        setShowTotals(savedShowTotals);
 
         if (firstWorksheet) {
           await loadFieldsForWorksheet(firstWorksheet);
@@ -508,7 +495,6 @@ function DialogApp() {
       tableau.extensions.settings.set('displaySettings', JSON.stringify(displaySettings));
       tableau.extensions.settings.set('showAllDimensionFields', String(showAllDimensionFields));
       tableau.extensions.settings.set('showAllMeasureFields', String(showAllMeasureFields));
-      tableau.extensions.settings.set('showTotals', String(showTotals));
 
       await tableau.extensions.settings.saveAsync();
       tableau.extensions.ui.closeDialog('saved');
@@ -995,8 +981,7 @@ function DialogApp() {
             ['Dimension headers', 'dimensionHeaderBg', 'dimensionHeaderText'],
             ['Dimension values', 'dimensionValueBg', 'dimensionValueText'],
             ['Measure headers', 'measureHeaderBg', 'measureHeaderText'],
-            ['Measure values', 'measureValueBg', 'measureValueText'],
-            ['Totals', 'totalBg', 'totalText']
+            ['Measure values', 'measureValueBg', 'measureValueText']
           ].map(([label, bgKey, textKey]) => (
             <div key={label} style={{ ...colorGrid, marginBottom: '10px' }}>
               <div>{label}</div>
@@ -1123,21 +1108,6 @@ function DialogApp() {
               })}
             </>
           )}
-        </div>
-      </div>
-
-      <div style={{ marginBottom: '22px' }}>
-        <label>Display Options</label>
-        <div style={{ ...sectionBox, marginTop: '8px' }}>
-          <label>
-            <input
-              type="checkbox"
-              checked={showTotals}
-              onChange={(e) => setShowTotals(e.target.checked)}
-              style={{ marginRight: '8px' }}
-            />
-            Show totals column
-          </label>
         </div>
       </div>
 
