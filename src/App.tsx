@@ -511,7 +511,7 @@ export default function App() {
   const [dataSourceSearch, setDataSourceSearch] = useState('');
 
   const [fieldLabelOverrides, setFieldLabelOverrides] = useState<Record<string, string>>({});
-  const [editingField, setEditingField] = useState<string | null>(null);
+ // const [editingField, setEditingField] = useState<string | null>(null);
   const [editingFieldLabel, setEditingFieldLabel] = useState<string | null>(null);
   const [editingFieldValue, setEditingFieldValue] = useState('');
 
