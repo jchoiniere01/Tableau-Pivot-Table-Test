@@ -511,7 +511,6 @@ export default function App() {
   const [dataSourceSearch, setDataSourceSearch] = useState('');
 
   const [fieldLabelOverrides, setFieldLabelOverrides] = useState<Record<string, string>>({});
-  //const [editingField, setEditingField] = useState<string | null>(null);
   const [editingFieldLabel, setEditingFieldLabel] = useState<string | null>(null);
   const [editingFieldValue, setEditingFieldValue] = useState('');
 
@@ -523,6 +522,14 @@ export default function App() {
     field: string;
     direction: 'asc' | 'desc';
   } | null>(null);
+
+  const [headerFilterMenu, setHeaderFilterMenu] = useState<{
+    field: string;
+    anchorRect: DOMRect | null;
+  } | null>(null);
+
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
+  const [columnFilterSearch, setColumnFilterSearch] = useState('');
 
   const [availableFields, setAvailableFields] = useState<FieldMeta[]>([]);
   const [dimensionFields, setDimensionFields] = useState<string[]>([]);
@@ -606,6 +613,62 @@ export default function App() {
     const override = fieldLabelOverrides[field]?.trim();
     if (override) return override;
     return availableFields.find((f) => f.fieldName === field)?.caption || field;
+  }
+
+  function isHeaderFilterValueSelected(field: string, value: string): boolean {
+    return !!columnFilters[field]?.includes(value);
+  }
+
+  function toggleHeaderFilterValue(field: string, value: string) {
+    setColumnFilters((prev) => {
+      const current = prev[field] || [];
+      const exists = current.includes(value);
+
+      const nextValues = exists
+        ? current.filter((v) => v !== value)
+        : [...current, value];
+
+      const next: Record<string, string[]> = { ...prev };
+      if (nextValues.length === 0) {
+        delete next[field];
+      } else {
+        next[field] = nextValues;
+      }
+
+      return next;
+    });
+  }
+
+  function clearHeaderFilter(field: string) {
+    setColumnFilters((prev) => {
+      const next: Record<string, string[]> = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }
+
+  function clearAllHeaderFilters() {
+    setColumnFilters({});
+  }
+
+  function getHeaderFilterOptions(field: string): string[] {
+    return Array.from(
+      new Set(
+        allRows
+          .map((row) => {
+            const value = row?.[field];
+            return value == null || value === '' ? '(Blank)' : String(value);
+          })
+      )
+    ).sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+    );
+  }
+
+  function getVisibleHeaderFilterOptions(field: string): string[] {
+    return getHeaderFilterOptions(field).filter((value) =>
+      value.toLowerCase().includes(columnFilterSearch.toLowerCase())
+    );
   }
 
   function startEditingFieldLabel(field: string) {
@@ -880,6 +943,9 @@ export default function App() {
     setSelectedMeasures(defaultMeasures);
     setDateRange({ field: '', start: '', end: '', preset: 'Custom Date Range' });
     setFilters([]);
+    setColumnFilters({});
+    setHeaderFilterMenu(null);
+    setColumnFilterSearch('');
     setOpenNestedFilterGroups({});
     setDataSourceSearch('');
     setFieldRoleOverrides({});
@@ -1043,7 +1109,7 @@ export default function App() {
           if (existing.role !== effectiveRole) {
             mergedFieldMap.set(field.fieldName, {
               ...existing,
-              role: field.role
+              role: effectiveRole
             });
           }
         }
@@ -1212,33 +1278,39 @@ export default function App() {
   }, [fieldRoleOverrides]);
 
   const filteredRows = useMemo(() => {
-      return allRows.filter((row) => {
-        if (dateRange.field && (dateRange.start || dateRange.end)) {
-          const rawValue = row[dateRange.field];
-          const rowDate = new Date(rawValue);
-          if (isNaN(rowDate.getTime())) return false;
+    return allRows.filter((row) => {
+      if (dateRange.field && (dateRange.start || dateRange.end)) {
+        const rawValue = row[dateRange.field];
+        const rowDate = new Date(rawValue);
+        if (isNaN(rowDate.getTime())) return false;
 
-          if (dateRange.start) {
-            const startDate = new Date(dateRange.start);
-            if (rowDate < startDate) return false;
-          }
-
-          if (dateRange.end) {
-            const endDate = new Date(dateRange.end);
-            endDate.setHours(23, 59, 59, 999);
-            if (rowDate > endDate) return false;
-          }
+        if (dateRange.start) {
+          const startDate = new Date(dateRange.start);
+          if (rowDate < startDate) return false;
         }
 
-        for (const filter of filters) {
-          const value = String(row[filter.field] ?? '');
-          if (!filter.values.includes(value)) return false;
+        if (dateRange.end) {
+          const endDate = new Date(dateRange.end);
+          endDate.setHours(23, 59, 59, 999);
+          if (rowDate > endDate) return false;
         }
+      }
 
-        return true;
-      });
-    }, [allRows, dateRange, filters]);
+      for (const filter of filters) {
+        const value = String(row[filter.field] ?? '');
+        if (!filter.values.includes(value)) return false;
+      }
 
+      for (const [field, selectedValues] of Object.entries(columnFilters)) {
+        if (!selectedValues.length) continue;
+        const rawValue = row[field];
+        const value = rawValue == null || rawValue === '' ? '(Blank)' : String(rawValue);
+        if (!selectedValues.includes(value)) return false;
+      }
+
+      return true;
+    });
+  }, [allRows, dateRange, filters, columnFilters]);
     const sortedStraightRows = useMemo(() => {
     if (!sortConfig) return filteredRows;
 
@@ -2451,132 +2523,199 @@ export default function App() {
   }
 
   function renderStraightTable() {
-    return (
-      <div style={{ width: '100%', height: '100%', overflow: 'auto' }}>
-        <table
-          style={{
-            borderCollapse: 'collapse',
-            width: 'max-content',
-            minWidth: '100%',
-            tableLayout: 'fixed'
-          }}
-        >
-          <thead>
-            <tr>
+  return (
+    <div style={{ width: '100%', height: '100%', overflow: 'auto' }}>
+      <table
+        style={{
+          borderCollapse: 'collapse',
+          width: 'max-content',
+          minWidth: '100%',
+          tableLayout: 'fixed'
+        }}
+      >
+        <thead>
+          <tr>
+            {selectedDimensions.map((field) => (
+              <th
+                key={field}
+                style={{
+                  background: '#075b67',
+                  color: '#fff',
+                  border: '1px solid #dce4ec',
+                  padding: '8px 10px',
+                  textAlign: 'left',
+                  fontSize: '12px'
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px'
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleSort(field)}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#fff',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      padding: 0
+                    }}
+                  >
+                    <span
+                      style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      {getDisplayLabel(field)}
+                    </span>
+                    <span>
+                      {sortConfig?.field === field
+                        ? sortConfig.direction === 'asc'
+                          ? '▲'
+                          : '▼'
+                        : '↕'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                      setColumnFilterSearch('');
+                      setHeaderFilterMenu({ field, anchorRect: rect });
+                    }}
+                    style={{
+                      width: '18px',
+                      height: '18px',
+                      border: 'none',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      padding: 0,
+                      color: '#ffffff',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0
+                    }}
+                    aria-label={`Filter ${getDisplayLabel(field)}`}
+                    title={`Filter ${getDisplayLabel(field)}`}
+                  >
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <circle cx="11" cy="11" r="7" />
+                      <path d="M20 20l-3.5-3.5" />
+                    </svg>
+                  </button>
+                </div>
+              </th>
+            ))}
+
+            {selectedMeasures.map((field) => (
+              <th
+                key={field}
+                style={{
+                  background: '#075b67',
+                  color: '#fff',
+                  border: '1px solid #dce4ec',
+                  padding: '8px 10px',
+                  textAlign: 'right',
+                  fontSize: '12px'
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleSort(field)}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#fff',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    padding: 0
+                  }}
+                >
+                  <span>{getDisplayLabel(field)}</span>
+                  <span>
+                    {sortConfig?.field === field
+                      ? sortConfig.direction === 'asc'
+                        ? '▲'
+                        : '▼'
+                      : '↕'}
+                  </span>
+                </button>
+              </th>
+            ))}
+          </tr>
+        </thead>
+
+        <tbody>
+          {sortedStraightRows.map((row, index) => (
+            <tr key={index}>
               {selectedDimensions.map((field) => (
-                <th
+                <td
                   key={field}
                   style={{
-                    background: '#075b67',
-                    color: '#fff',
-                    border: '1px solid #dce4ec',
+                    border: '1px solid #e8edf3',
+                    background: index % 2 === 0 ? '#ffffff' : '#f7fafc',
                     padding: '8px 10px',
-                    textAlign: 'left',
                     fontSize: '12px'
                   }}
                 >
-                   <button
-                      type="button"
-                      onClick={() => toggleSort(field)}
-                      style={{
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        background: 'transparent',
-                        border: 'none',
-                        color: '#fff',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                        padding: 0
-                      }}
-                    >
-                      <span>{getDisplayLabel(field)}</span>
-                      <span>
-                        {sortConfig?.field === field ? (sortConfig.direction === 'asc' ? '▲' : '▼') : '↕'}
-                      </span>
-                    </button>
-                </th>
+                  {row[field] ?? ''}
+                </td>
               ))}
+
               {selectedMeasures.map((field) => (
-                <th
+                <td
                   key={field}
                   style={{
-                    background: '#075b67',
-                    color: '#fff',
-                    border: '1px solid #dce4ec',
+                    border: '1px solid #e8edf3',
+                    background: index % 2 === 0 ? '#ffffff' : '#f7fafc',
                     padding: '8px 10px',
                     textAlign: 'right',
+                    whiteSpace: 'nowrap',
                     fontSize: '12px'
                   }}
                 >
-                    <button
-                      type="button"
-                      onClick={() => toggleSort(field)}
-                      style={{
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        background: 'transparent',
-                        border: 'none',
-                        color: '#fff',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                        padding: 0
-                      }}
-                    >
-                      <span>{getDisplayLabel(field)}</span>
-                      <span>
-                        {sortConfig?.field === field ? (sortConfig.direction === 'asc' ? '▲' : '▼') : '↕'}
-                      </span>
-                    </button>
-                </th>
+                  {formatMeasureValue(field, parseNumber(row[field]))}
+                </td>
               ))}
             </tr>
-          </thead>
-
-          <tbody>
-            {sortedStraightRows.map((row, index) => (
-              <tr key={index}>
-                {selectedDimensions.map((field) => (
-                  <td
-                    key={field}
-                    style={{
-                      border: '1px solid #e8edf3',
-                      background: index % 2 === 0 ? '#ffffff' : '#f7fafc',
-                      padding: '8px 10px',
-                      fontSize: '12px'
-                    }}
-                  >
-                    {row[field] ?? ''}
-                  </td>
-                ))}
-
-                {selectedMeasures.map((field) => (
-                  <td
-                    key={field}
-                    style={{
-                      border: '1px solid #e8edf3',
-                      background: index % 2 === 0 ? '#ffffff' : '#f7fafc',
-                      padding: '8px 10px',
-                      textAlign: 'right',
-                      whiteSpace: 'nowrap',
-                      fontSize: '12px'
-                    }}
-                  >
-                    {formatMeasureValue(field, parseNumber(row[field]))}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    );
-  }
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
   return (
 
@@ -2733,6 +2872,133 @@ export default function App() {
         </div>
       )}
 
+      {headerFilterMenu && (
+        <div
+          onClick={() => setHeaderFilterMenu(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 250
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'fixed',
+              top: (headerFilterMenu.anchorRect?.bottom || 80) + 6,
+              left: Math.max(12, (headerFilterMenu.anchorRect?.left || 12) - 180),
+              width: '240px',
+              maxHeight: '320px',
+              overflow: 'hidden',
+              border: '1px solid #d8e2ee',
+              borderRadius: '12px',
+              background: '#ffffff',
+              boxShadow: '0 18px 40px rgba(15, 23, 42, 0.16)',
+              display: 'flex',
+              flexDirection: 'column'
+            }}
+          >
+            <div style={{ padding: '10px', borderBottom: '1px solid #eef2f7' }}>
+              <div style={{ fontSize: '12px', fontWeight: 700, color: '#0f172a', marginBottom: '8px' }}>
+                Filter {getDisplayLabel(headerFilterMenu.field)}
+              </div>
+
+              <input
+                type="text"
+                value={columnFilterSearch}
+                onChange={(e) => setColumnFilterSearch(e.target.value)}
+                placeholder="Search values..."
+                style={{
+                  width: '100%',
+                  height: '32px',
+                  border: '1px solid #d7dfea',
+                  borderRadius: '8px',
+                  padding: '0 10px',
+                  fontSize: '12px',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+
+            <div style={{ padding: '8px', overflowY: 'auto', maxHeight: '220px' }}>
+              {getHeaderFilterOptions(headerFilterMenu.field)
+                .filter((value) =>
+                  value.toLowerCase().includes(columnFilterSearch.toLowerCase())
+                )
+                .map((value) => {
+                  const checked = isHeaderFilterValueSelected(headerFilterMenu.field, value);
+
+                  return (
+                    <label
+                      key={value}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        padding: '6px 4px',
+                        fontSize: '12px',
+                        color: '#334155',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleHeaderFilterValue(headerFilterMenu.field, value)}
+                      />
+                      <span>{value}</span>
+                    </label>
+                  );
+                })}
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: '8px',
+                padding: '10px',
+                borderTop: '1px solid #eef2f7'
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => clearHeaderFilter(headerFilterMenu.field)}
+                style={{
+                  height: '30px',
+                  padding: '0 10px',
+                  border: '1px solid #d8e2ee',
+                  borderRadius: '8px',
+                  background: '#fff',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer'
+                }}
+              >
+                Clear
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setHeaderFilterMenu(null)}
+                style={{
+                  height: '30px',
+                  padding: '0 10px',
+                  border: 'none',
+                  borderRadius: '8px',
+                  background: '#075b67',
+                  color: '#fff',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer'
+                }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={{ flex: '0 0 auto', padding: '12px 18px 0' }}>
         <div
