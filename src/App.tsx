@@ -647,10 +647,6 @@ export default function App() {
     });
   }
 
-  function clearAllHeaderFilters() {
-    setColumnFilters({});
-  }
-
   function getHeaderFilterOptions(field: string): string[] {
     return Array.from(
       new Set(
@@ -662,12 +658,6 @@ export default function App() {
       )
     ).sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
-    );
-  }
-
-  function getVisibleHeaderFilterOptions(field: string): string[] {
-    return getHeaderFilterOptions(field).filter((value) =>
-      value.toLowerCase().includes(columnFilterSearch.toLowerCase())
     );
   }
 
