@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import exportIcon from './assets/icons/export-icon.png';
+import { Grid } from 'react-window';
 
 declare const tableau: any;
 declare const XLSX: any;
@@ -33,6 +34,17 @@ type VisibleNode = {
   pathValues: string[];
   measures: Record<string, number>;
   hasChildren: boolean;
+};
+
+type PivotNode = {
+  id: string;
+  label: string;
+  level: number;
+  dimensionIndex: number;
+  hasChildren: boolean;
+  parentId?: string;
+  measures: Record<string, number>;
+  children: PivotNode[];
 };
 
 type DateRangeState = {
@@ -122,6 +134,13 @@ const DATE_PRESETS = [
   'This Year'
 ];
 
+const PAGE_SIZE = 5000;
+const MAX_PIVOT_ROWS = 25000;
+const INITIAL_PAGE_COUNT = 3;
+const LOAD_MORE_THRESHOLD_PX = 300;
+const STRAIGHT_ROW_HEIGHT = 36;
+const STRAIGHT_HEADER_HEIGHT = 38;
+
 function parseNumber(value: any): number {
   if (value === null || value === undefined || value === '') return 0;
   if (typeof value === 'number') return value;
@@ -206,6 +225,18 @@ function buildFieldMeta(columns: any[]): FieldMeta[] {
       dataType: String(col?.dataType || col?.datatype || ''),
       role: inferFieldRole(col)
     };
+  });
+}
+
+function dataTableToRows(dataTable: any, worksheetName: string): PreviewRow[] {
+  return dataTable.data.map((row: any[]) => {
+    const obj: PreviewRow = { __sourceWorksheet: worksheetName };
+
+    dataTable.columns.forEach((col: any, index: number) => {
+      obj[col.fieldName] = row[index]?.value ?? row[index]?.formattedValue ?? '';
+    });
+
+    return obj;
   });
 }
 
@@ -379,9 +410,9 @@ function groupFields(fields: FieldMeta[]): GroupedFieldSection[] {
     map.get(label)!.push(field);
   });
 
-  return Array.from(map.entries()).map(([label, groupFields]) => ({
+  return Array.from(map.entries()).map(([label, group]) => ({
     label,
-    fields: groupFields.sort((a, b) => a.caption.localeCompare(b.caption))
+    fields: group.sort((a, b) => a.caption.localeCompare(b.caption))
   }));
 }
 
@@ -547,7 +578,17 @@ export default function App() {
   const [filters, setFilters] = useState<SimpleFilterState[]>([]);
   const [openNestedFilterGroups, setOpenNestedFilterGroups] = useState<Record<string, boolean>>({});
 
-  const [allRows, setAllRows] = useState<PreviewRow[]>([]);
+  const readerMapRef = useRef<Record<string, any>>({});
+  const fieldMapRef = useRef<WorksheetFieldsMap>({});
+  const nextPageByWorksheetRef = useRef<Record<string, number>>({});
+
+  const [loadedRows, setLoadedRows] = useState<PreviewRow[]>([]);
+  const [totalAvailableRows, setTotalAvailableRows] = useState(0);
+  const [isPartialData, setIsPartialData] = useState(false);
+  const [isLoadingData, setIsLoadingData] = useState(false);
+  const [isLoadingNextPage, setIsLoadingNextPage] = useState(false);
+  const [hasMorePages, setHasMorePages] = useState(false);
+
   const [treeRoots, setTreeRoots] = useState<TreeNode[]>([]);
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
 
@@ -561,22 +602,368 @@ export default function App() {
   const [dimensionMenuOpen, setDimensionMenuOpen] = useState(false);
   const [measureMenuOpen, setMeasureMenuOpen] = useState(false);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
 
   const sourceMenuRef = useRef<HTMLDivElement | null>(null);
   const dateMenuRef = useRef<HTMLDivElement | null>(null);
   const dimensionMenuRef = useRef<HTMLDivElement | null>(null);
   const measureMenuRef = useRef<HTMLDivElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
+  const straightTableViewportRef = useRef<HTMLDivElement | null>(null);
+  const straightTableHeaderRef = useRef<HTMLDivElement | null>(null);
+  const straightTableGridRef = useRef<any>(null);
+  const straightTableHeaderContentRef = useRef<HTMLDivElement | null>(null);
+  const handleStraightTableGridScroll: React.UIEventHandler<HTMLDivElement> = useCallback(
+    () => {
+      const body =
+        ((straightTableGridRef.current as any)?.element ??
+          (straightTableGridRef.current as any)?._outerRef) as HTMLDivElement | null;
+
+      if (!body) return;
+
+      const left = body.scrollLeft;
+
+      if (straightTableHeaderRef.current && straightTableHeaderRef.current.scrollLeft !== left) {
+        straightTableHeaderRef.current.scrollLeft = left;
+      }
+
+      const totalContentHeight = loadedRows.length * STRAIGHT_ROW_HEIGHT;
+      const viewportHeight = body.clientHeight;
+      const distanceFromBottom =
+        totalContentHeight - body.scrollTop - viewportHeight;
+
+      if (
+        distanceFromBottom <= LOAD_MORE_THRESHOLD_PX &&
+        hasMorePages &&
+        !isLoadingNextPage
+      ) {
+        loadNextPage();
+      }
+    },
+    [loadedRows.length, hasMorePages, isLoadingNextPage, loadNextPage]
+  );
+  
+  const [straightTableViewportSize, setStraightTableViewportSize] = useState({
+    width: 0,
+    height: 0
+  });
+
+
 
   const unregisterHandlersRef = useRef<(() => void)[]>([]);
   const refreshTimerRef = useRef<number | null>(null);
   const initialLoadCompleteRef = useRef(false);
+
+  function getDisplayLabel(field: string): string {
+    const override = fieldLabelOverrides[field]?.trim();
+    if (override) return override;
+    return availableFields.find((f) => f.fieldName === field)?.caption || field;
+  }
+
+  const straightTableColumns = useMemo(
+    () => [
+      ...selectedDimensions.map((field) => ({
+        key: field,
+        label: getDisplayLabel(field),
+        width: 180,
+        kind: 'dimension' as const
+      })),
+      ...selectedMeasures.map((field) => ({
+        key: field,
+        label: getDisplayLabel(field),
+        width: 140,
+        kind: 'measure' as const
+      }))
+    ],
+    [selectedDimensions, selectedMeasures, fieldLabelOverrides, availableFields]
+  );
+
+  const getStraightTableColumnWidth = (index: number) =>
+    straightTableColumns[index]?.width ?? 140;
+
+  async function releaseReaders() {
+    const readers = Object.values(readerMapRef.current);
+
+    await Promise.all(
+      readers.map(async (reader: any) => {
+        try {
+          await reader.releaseAsync();
+        } catch {
+          //
+        }
+      })
+    );
+
+    readerMapRef.current = {};
+    nextPageByWorksheetRef.current = {};
+  }
+
+  const straightTableTotalWidth = useMemo(() => {
+    return straightTableColumns.reduce(
+      (_, __, index) => _ + getStraightTableColumnWidth(index),
+      0
+    );
+  }, [straightTableColumns, layoutSettings, selectedDimensions, selectedMeasures]);
+
+  function updateHasMorePages(sourceNames: string[]) {
+    const next = sourceNames.some((worksheetName) => {
+      const reader = readerMapRef.current[worksheetName];
+      const nextPage = nextPageByWorksheetRef.current[worksheetName] ?? 0;
+      return !!reader && nextPage < reader.pageCount;
+    });
+
+    setHasMorePages(next);
+  }
+
+  async function initializeWorksheetReader(
+    worksheet: any,
+    initialPageCount = INITIAL_PAGE_COUNT
+  ): Promise<{ rows: PreviewRow[]; fields: FieldMeta[]; totalRowCount: number }> {
+    const reader = await worksheet.getSummaryDataReaderAsync(PAGE_SIZE);
+
+    readerMapRef.current[worksheet.name] = reader;
+
+    const totalRowCount = reader.totalRowCount;
+    const pagesToLoad = Math.min(reader.pageCount, initialPageCount);
+
+    let fields: FieldMeta[] = [];
+    const rows: PreviewRow[] = [];
+
+    for (let pageNumber = 0; pageNumber < pagesToLoad; pageNumber++) {
+      const page = await reader.getPageAsync(pageNumber);
+
+      if (fields.length === 0) {
+        fields = buildFieldMeta(page.columns);
+      }
+
+      rows.push(...dataTableToRows(page, worksheet.name));
+    }
+
+    nextPageByWorksheetRef.current[worksheet.name] = pagesToLoad;
+
+    return { rows, fields, totalRowCount };
+  }
+
+  async function loadAllWorksheetRowsForExport(
+    worksheet: any
+  ): Promise<{ rows: PreviewRow[]; fields: FieldMeta[]; totalRowCount: number }> {
+    const reader = await worksheet.getSummaryDataReaderAsync(PAGE_SIZE);
+
+    try {
+      const totalRowCount = reader.totalRowCount;
+      const pageCount = reader.pageCount;
+
+      let fields: FieldMeta[] = [];
+      const rows: PreviewRow[] = [];
+
+      for (let pageNumber = 0; pageNumber < pageCount; pageNumber++) {
+        const page = await reader.getPageAsync(pageNumber);
+
+        if (fields.length === 0) {
+          fields = buildFieldMeta(page.columns);
+        }
+
+        rows.push(...dataTableToRows(page, worksheet.name));
+      }
+
+      return { rows, fields, totalRowCount };
+    } finally {
+      try {
+        await reader.releaseAsync();
+      } catch {
+        //
+      }
+    }
+  }
+
+  function buildStraightExportRowsFromRows(rows: any[]) {
+    return rows.map((row) => {
+      const exportRow: Record<string, string | number> = {};
+
+      for (const field of selectedDimensions) {
+        exportRow[getDisplayLabel(field)] = row[field] ?? '';
+      }
+
+      for (const field of selectedMeasures) {
+        exportRow[getDisplayLabel(field)] = parseNumber(row[field]);
+      }
+
+      return exportRow;
+    });
+  }
+
+  function buildPivotTreeFromRows(rows: any[]): PivotNode[] {
+    if (selectedDimensions.length === 0) {
+      return [];
+    }
+
+    function buildLevel(
+      levelRows: any[],
+      dimensionIndex: number,
+      parentId?: string,
+      parentPath = ''
+    ): PivotNode[] {
+      const field = selectedDimensions[dimensionIndex];
+      if (!field) return [];
+
+      const grouped = new Map<string, any[]>();
+
+      for (const row of levelRows) {
+        const rawValue = row[field];
+        const label =
+          rawValue === null || rawValue === undefined || rawValue === ''
+            ? '(Blank)'
+            : String(rawValue);
+
+        const bucket = grouped.get(label);
+        if (bucket) {
+          bucket.push(row);
+        } else {
+          grouped.set(label, [row]);
+        }
+      }
+
+      const nodes = Array.from(grouped.entries()).map(([label, groupRows]) => {
+        const nodeId = parentPath ? `${parentPath}__${field}:${label}` : `${field}:${label}`;
+
+        const measures: Record<string, number> = {};
+        for (const measure of selectedMeasures) {
+          let total = 0;
+          for (const row of groupRows) {
+            const value = parseNumber(row[measure]);
+            total += Number.isFinite(value) ? value : 0;
+          }
+          measures[measure] = total;
+        }
+
+        const children =
+          dimensionIndex < selectedDimensions.length - 1
+            ? buildLevel(groupRows, dimensionIndex + 1, nodeId, nodeId)
+            : [];
+
+        return {
+          id: nodeId,
+          label,
+          level: dimensionIndex,
+          dimensionIndex,
+          hasChildren: children.length > 0,
+          parentId,
+          measures,
+          children
+        };
+      });
+
+      nodes.sort((a, b) => a.label.localeCompare(b.label));
+      return nodes;
+    }
+
+    return buildLevel(rows, 0);
+  }
+
+  function flattenAllPivotNodes(nodes: PivotNode[]): PivotNode[] {
+    const result: PivotNode[] = [];
+
+    function walk(items: PivotNode[]) {
+      for (const node of items) {
+        result.push(node);
+        if (node.children.length > 0) {
+          walk(node.children);
+        }
+      }
+    }
+
+    walk(nodes);
+    return result;
+  }
+
+  function buildPivotExportRowsFromNodes(nodes: PivotNode[]) {
+    const hierarchyLabel =
+      selectedDimensions.length > 0
+        ? selectedDimensions.map(getDisplayLabel).join(' / ')
+        : 'Hierarchy';
+
+    return nodes.map((node) => {
+      const row: Record<string, string | number> = {
+        [hierarchyLabel]: `${'  '.repeat(node.level)}${node.label}`
+      };
+
+      for (const field of selectedMeasures) {
+        row[getDisplayLabel(field)] = node.measures[field] ?? 0;
+      }
+
+      return row;
+    });
+  }
+
+  async function getExportRowsForCurrentSelection(): Promise<{
+    rows: PreviewRow[];
+    fields: FieldMeta[];
+    totalRowCount: number;
+  }> {
+    const dashboard = tableau.extensions.dashboardContent.dashboard;
+    const selectedWorksheets = dashboard.worksheets.filter((w: any) =>
+      selectedSources.includes(w.name)
+    );
+
+    const results = await Promise.all(
+      selectedWorksheets.map((worksheet: any) =>
+        loadAllWorksheetRowsForExport(worksheet)
+      )
+    );
+
+    return {
+      rows: results.flatMap((result) => result.rows),
+      fields: results.flatMap((result) => result.fields),
+      totalRowCount: results.reduce(
+        (sum, result) => sum + result.totalRowCount,
+        0
+      )
+    };
+  }
+
+  async function handleExportStraightTable() {
+    const { rows } = await getExportRowsForCurrentSelection();
+    const filteredExportRows = applyAllActiveFilters(rows);
+    const exportRows = buildStraightExportRowsFromRows(filteredExportRows);
+    exportRowsToExcel(exportRows);
+  }
+
+  async function handleExportPivotRawData() {
+    const { rows } = await getExportRowsForCurrentSelection();
+    const filteredExportRows = applyAllActiveFilters(rows);
+    const exportRows = buildStraightExportRowsFromRows(filteredExportRows);
+    exportRowsToExcel(exportRows);
+  }
+
+  async function handleExportPivotExpanded() {
+    const { rows } = await getExportRowsForCurrentSelection();
+    const filteredExportRows = applyAllActiveFilters(rows);
+    const tree = buildPivotTreeFromRows(filteredExportRows);
+    const allNodes = flattenAllPivotNodes(tree);
+    const exportRows = buildPivotExportRowsFromNodes(allNodes);
+    exportRowsToExcel(exportRows);
+  }
+
+  async function exportCurrentView() {
+    if (selectedMeasures.length === 0) {
+      setMessage('Please select at least one metric.');
+      return;
+    }
+
+    if (viewMode === 'straight') {
+      await handleExportStraightTable();
+    } else {
+      await handleExportPivotExpanded();
+    }
+  }
 
   function clearEventListeners() {
     unregisterHandlersRef.current.forEach((unregister) => {
       try {
         unregister();
       } catch {
+        //
       }
     });
     unregisterHandlersRef.current = [];
@@ -607,12 +994,6 @@ export default function App() {
       }
       setMessage(`Configure error: ${error?.message || error}`);
     }
-  }
-
-  function getDisplayLabel(field: string): string {
-    const override = fieldLabelOverrides[field]?.trim();
-    if (override) return override;
-    return availableFields.find((f) => f.fieldName === field)?.caption || field;
   }
 
   function isHeaderFilterValueSelected(field: string, value: string): boolean {
@@ -650,26 +1031,42 @@ export default function App() {
   function getHeaderFilterOptions(field: string): string[] {
     return Array.from(
       new Set(
-        allRows
-          .map((row) => {
-            const value = row?.[field];
-            return value == null || value === '' ? '(Blank)' : String(value);
-          })
+        loadedRows.map((row) => {
+          const value = row?.[field];
+          return value == null || value === '' ? '(Blank)' : String(value);
+        })
       )
     ).sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
     );
   }
 
-  function startEditingFieldLabel(field: string) {
-    console.log('startEditingFieldLabel fired for:', field);
-    setEditingFieldLabel(field);
-    setEditingFieldValue(getDisplayLabel(field));
-  }
-
   useEffect(() => {
-    console.log('editingFieldLabel changed:', editingFieldLabel);
-  }, [editingFieldLabel]);
+    const element = straightTableViewportRef.current;
+    if (!element) return;
+
+    const updateSize = () => {
+      const rect = element.getBoundingClientRect();
+      setStraightTableViewportSize({
+        width: Math.max(320, Math.floor(rect.width)),
+        height: Math.max(240, Math.floor(rect.height))
+      });
+    };
+
+    updateSize();
+
+    const observer = new ResizeObserver(() => {
+      updateSize();
+    });
+
+    observer.observe(element);
+    window.addEventListener('resize', updateSize);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateSize);
+    };
+  }, []);
 
   function getDisplayLabelFromWorksheetField(field: FieldMeta): string {
     const override = fieldLabelOverrides[field.fieldName]?.trim();
@@ -794,7 +1191,7 @@ export default function App() {
     });
   }
 
-  function beginEditFieldLabel(field: string) {
+  function startEditingFieldLabel(field: string) {
     setEditingFieldLabel(field);
     setEditingFieldValue(getDisplayLabel(field));
   }
@@ -971,7 +1368,7 @@ export default function App() {
       .map((field) => ({
         label: field.caption,
         field: field.fieldName,
-        options: getFieldDistinctValuesFromRows(allRows, field.fieldName).slice(0, 25)
+        options: getFieldDistinctValuesFromRows(loadedRows, field.fieldName).slice(0, 25)
       }))
       .filter((group) => group.options.length > 0);
   }
@@ -1042,6 +1439,7 @@ export default function App() {
         );
         unregisterHandlersRef.current.push(filterHandler);
       } catch {
+        //
       }
 
       if (tableau.TableauEventType?.SummaryDataChanged) {
@@ -1052,31 +1450,14 @@ export default function App() {
           );
           unregisterHandlersRef.current.push(summaryHandler);
         } catch {
+          //
         }
       }
     });
   }
 
-  async function loadWorksheetRows(
-    worksheet: any
-  ): Promise<{ rows: PreviewRow[]; fields: FieldMeta[] }> {
-    const dataTable = await worksheet.getSummaryDataAsync();
 
-    const fields = buildFieldMeta(dataTable.columns);
-
-    const rows: PreviewRow[] = dataTable.data.map((row: any[]) => {
-      const obj: PreviewRow = { __sourceWorksheet: worksheet.name };
-
-      dataTable.columns.forEach((col: any, index: number) => {
-        obj[col.fieldName] = row[index]?.value ?? row[index]?.formattedValue ?? '';
-      });
-
-      return obj;
-    });
-
-    return { rows, fields };
-  }
-
+  
   function rebuildFieldsFromSelectedSources(
     sourceNames: string[],
     currentWorksheetFields: WorksheetFieldsMap,
@@ -1095,13 +1476,11 @@ export default function App() {
             ...field,
             role: effectiveRole
           });
-        } else {
-          if (existing.role !== effectiveRole) {
-            mergedFieldMap.set(field.fieldName, {
-              ...existing,
-              role: effectiveRole
-            });
-          }
+        } else if (existing.role !== effectiveRole) {
+          mergedFieldMap.set(field.fieldName, {
+            ...existing,
+            role: effectiveRole
+          });
         }
       });
     });
@@ -1130,17 +1509,7 @@ export default function App() {
       return valid.length > 0 ? valid : measures.slice(0, 2);
     });
 
-    setFilters((prev) =>
-      prev
-        .filter((filter) => dims.includes(filter.field))
-        .map((filter) => ({
-          ...filter,
-          values: filter.values.filter((value) =>
-            getFieldDistinctValuesFromRows(allRows, filter.field).includes(value)
-          )
-        }))
-        .filter((filter) => filter.values.length > 0)
-    );
+    setFilters((prev) => prev.filter((filter) => dims.includes(filter.field)));
 
     setDateRange((prev) => {
       const nextField =
@@ -1158,8 +1527,12 @@ export default function App() {
 
   async function loadAllSelectedWorksheets(sourceNames: string[], isRefresh = false) {
     if (!sourceNames.length) {
-      setAllRows([]);
+      await releaseReaders();
+      setLoadedRows([]);
       setAvailableFields([]);
+      setTotalAvailableRows(0);
+      setIsPartialData(false);
+      setHasMorePages(false);
       setMessage('Select at least one data source.');
       return;
     }
@@ -1168,35 +1541,89 @@ export default function App() {
     const selectedWorksheets = dashboard.worksheets.filter((w: any) => sourceNames.includes(w.name));
 
     if (!isRefresh) setMessage('Loading data...');
+    setIsLoadingData(true);
 
-    const results = await Promise.all(
-      selectedWorksheets.map((worksheet: any) => loadWorksheetRows(worksheet))
-    );
+    try {
+      await releaseReaders();
 
-    const mergedRows = results.flatMap((r) => r.rows);
+      const results = await Promise.all(
+        selectedWorksheets.map((worksheet: any) => initializeWorksheetReader(worksheet))
+      );
 
-    const nextWorksheetFields: WorksheetFieldsMap = {};
-    selectedWorksheets.forEach((worksheet: any, index: number) => {
-      nextWorksheetFields[worksheet.name] = results[index].fields;
-    });
+      const mergedRows = results.flatMap((r) => r.rows);
+      const totalRows = results.reduce((sum, r) => sum + r.totalRowCount, 0);
+      const partial = mergedRows.length < totalRows;
 
-    setAllRows(mergedRows);
-    setWorksheetFields((prev) => {
-      const combined = { ...prev, ...nextWorksheetFields };
-      rebuildFieldsFromSelectedSources(sourceNames, combined, fieldRoleOverrides);
-      return combined;
-    });
-
-    setExpandedWorksheetFields((prev) => {
-      const next = { ...prev };
-      sourceNames.forEach((name) => {
-        if (next[name] === undefined) next[name] = false;
+      const nextWorksheetFields: WorksheetFieldsMap = {};
+      selectedWorksheets.forEach((worksheet: any, index: number) => {
+        nextWorksheetFields[worksheet.name] = results[index].fields;
       });
-      return next;
-    });
 
-    await registerWorksheetListeners(sourceNames);
-    setMessage('');
+      fieldMapRef.current = nextWorksheetFields;
+
+      setLoadedRows(mergedRows);
+      setTotalAvailableRows(totalRows);
+      setIsPartialData(partial);
+
+      setWorksheetFields((prev) => {
+        const combined = { ...prev, ...nextWorksheetFields };
+        rebuildFieldsFromSelectedSources(sourceNames, combined, fieldRoleOverrides);
+        return combined;
+      });
+
+      setExpandedWorksheetFields((prev) => {
+        const next = { ...prev };
+        sourceNames.forEach((name) => {
+          if (next[name] === undefined) next[name] = false;
+        });
+        return next;
+      });
+
+      updateHasMorePages(sourceNames);
+      await registerWorksheetListeners(sourceNames);
+
+      setMessage('');
+    } catch (error: any) {
+      setMessage(`Load error: ${error?.message || error}`);
+    } finally {
+      setIsLoadingData(false);
+    }
+  }
+
+  async function loadNextPage() {
+    if (isLoadingNextPage || !hasMorePages || selectedSources.length === 0) return;
+
+    setIsLoadingNextPage(true);
+
+    try {
+      const pageResults = await Promise.all(
+        selectedSources.map(async (worksheetName) => {
+          const reader = readerMapRef.current[worksheetName];
+          const nextPage = nextPageByWorksheetRef.current[worksheetName] ?? 0;
+
+          if (!reader || nextPage >= reader.pageCount) {
+            return [];
+          }
+
+          const page = await reader.getPageAsync(nextPage);
+          nextPageByWorksheetRef.current[worksheetName] = nextPage + 1;
+
+          return dataTableToRows(page, worksheetName);
+        })
+      );
+
+      const appendedRows = pageResults.flat();
+
+      if (appendedRows.length > 0) {
+        setLoadedRows((prev) => [...prev, ...appendedRows]);
+      }
+
+      updateHasMorePages(selectedSources);
+    } catch (error: any) {
+      setMessage(`Load more error: ${error?.message || error}`);
+    } finally {
+      setIsLoadingNextPage(false);
+    }
   }
 
   useEffect(() => {
@@ -1236,6 +1663,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    setIsPartialData(loadedRows.length < totalAvailableRows);
+  }, [loadedRows, totalAvailableRows]);
+
+  useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       const target = event.target as Node;
 
@@ -1244,6 +1675,7 @@ export default function App() {
       if (dimensionMenuRef.current && !dimensionMenuRef.current.contains(target)) setDimensionMenuOpen(false);
       if (measureMenuRef.current && !measureMenuRef.current.contains(target)) setMeasureMenuOpen(false);
       if (filterMenuRef.current && !filterMenuRef.current.contains(target)) setFilterMenuOpen(false);
+      if (exportMenuRef.current && !exportMenuRef.current.contains(target)) {setExportMenuOpen(false);}
     }
 
     document.addEventListener('mousedown', handleClickOutside);
@@ -1256,7 +1688,7 @@ export default function App() {
     if (selectedSources.length > 0) {
       loadAllSelectedWorksheets(selectedSources);
     } else {
-      setAllRows([]);
+      setLoadedRows([]);
       setAvailableFields([]);
     }
   }, [selectedSources]);
@@ -1267,8 +1699,8 @@ export default function App() {
     }
   }, [fieldRoleOverrides]);
 
-  const filteredRows = useMemo(() => {
-    return allRows.filter((row) => {
+  function applyAllActiveFilters(rows: PreviewRow[]): PreviewRow[] {
+    return rows.filter((row) => {
       if (dateRange.field && (dateRange.start || dateRange.end)) {
         const rawValue = row[dateRange.field];
         const rowDate = new Date(rawValue);
@@ -1300,8 +1732,22 @@ export default function App() {
 
       return true;
     });
-  }, [allRows, dateRange, filters, columnFilters]);
-    const sortedStraightRows = useMemo(() => {
+  }
+
+  const filteredRows = useMemo(() => {
+    return applyAllActiveFilters(loadedRows);
+  }, [loadedRows, dateRange, filters, columnFilters]);
+
+  const visibleRowCount = filteredRows.length;
+  const loadedRowCount = loadedRows.length;
+  const availableRowCount = totalAvailableRows;
+
+  const hasActiveFilters =
+    (dateRange.field && (dateRange.start || dateRange.end)) ||
+    filters.length > 0 ||
+    Object.values(columnFilters).some((values) => values.length > 0);
+
+  const sortedStraightRows = useMemo(() => {
     if (!sortConfig) return filteredRows;
 
     const { field, direction } = sortConfig;
@@ -1321,7 +1767,14 @@ export default function App() {
     });
   }, [filteredRows, sortConfig, selectedMeasures]);
 
+  const canUsePivot = filteredRows.length <= MAX_PIVOT_ROWS && !isPartialData;
+
   useEffect(() => {
+    if (!canUsePivot) {
+      setTreeRoots([]);
+      return;
+    }
+
     const roots = buildTree(filteredRows, selectedDimensions, selectedMeasures);
     setTreeRoots(roots);
 
@@ -1332,12 +1785,96 @@ export default function App() {
       });
       return next;
     });
+  }, [canUsePivot, filteredRows, selectedDimensions, selectedMeasures]);
+
+  const pivotTreeRoots = useMemo<PivotNode[]>(() => {
+    if (selectedDimensions.length === 0) {
+      return [];
+    }
+
+    function buildLevel(
+      rows: any[],
+      dimensionIndex: number,
+      parentId?: string,
+      parentPath = ''
+    ): PivotNode[] {
+      const field = selectedDimensions[dimensionIndex];
+      if (!field) {
+        return [];
+      }
+
+      const grouped = new Map<string, any[]>();
+
+      for (const row of rows) {
+        const rawValue = row[field];
+        const label =
+          rawValue === null || rawValue === undefined || rawValue === ''
+            ? '(Blank)'
+            : String(rawValue);
+
+        const bucket = grouped.get(label);
+        if (bucket) {
+          bucket.push(row);
+        } else {
+          grouped.set(label, [row]);
+        }
+      }
+
+      const nodes = Array.from(grouped.entries()).map(([label, groupRows]) => {
+        const nodeId = parentPath
+          ? `${parentPath}__${field}:${label}`
+          : `${field}:${label}`;
+
+        const measures: Record<string, number> = {};
+        for (const measure of selectedMeasures) {
+          let total = 0;
+          for (const row of groupRows) {
+            const value = parseNumber(row[measure]);
+            total += Number.isFinite(value) ? value : 0;
+          }
+          measures[measure] = total;
+        }
+
+        const children =
+          dimensionIndex < selectedDimensions.length - 1
+            ? buildLevel(groupRows, dimensionIndex + 1, nodeId, nodeId)
+            : [];
+
+        return {
+          id: nodeId,
+          label,
+          level: dimensionIndex,
+          dimensionIndex,
+          hasChildren: children.length > 0,
+          parentId,
+          measures,
+          children
+        };
+      });
+
+      nodes.sort((a, b) => a.label.localeCompare(b.label));
+      return nodes;
+    }
+
+    return buildLevel(filteredRows, 0);
   }, [filteredRows, selectedDimensions, selectedMeasures]);
 
-  const visibleNodes = useMemo(
-    () => flattenVisibleNodes(treeRoots, expandedNodes),
-    [treeRoots, expandedNodes]
-  );
+  const visibleNodes = useMemo<PivotNode[]>(() => {
+    const result: PivotNode[] = [];
+
+    function walk(nodes: PivotNode[]) {
+      for (const node of nodes) {
+        result.push(node);
+
+        if (node.hasChildren && expandedNodes[node.id]) {
+          walk(node.children);
+        }
+      }
+    }
+
+    walk(pivotTreeRoots);
+    return result;
+  }, [pivotTreeRoots, expandedNodes]);
 
   const hierarchyWidth = Math.max(MIN_HIERARCHY_WIDTH, layoutSettings.hierarchyWidth);
 
@@ -1361,16 +1898,16 @@ export default function App() {
 
   const filterDefinitions = useMemo(
     () => getFilterDefinitions(),
-    [availableFields, allRows, selectedDimensions, filters]
+    [availableFields, loadedRows, selectedDimensions, filters]
   );
 
   const infoResults = useMemo<InfoResult[]>(() => {
     return infoCalculations.map((calc) => ({
       id: calc.id,
       label: calc.label,
-      value: evaluateInfoCalculation(calc, allRows)
+      value: evaluateInfoCalculation(calc, loadedRows)
     }));
-  }, [infoCalculations, allRows]);
+  }, [infoCalculations, loadedRows]);
 
   const filteredWorksheets = useMemo(() => {
     const search = dataSourceSearch.trim().toLowerCase();
@@ -1432,38 +1969,6 @@ export default function App() {
     window.addEventListener('mouseup', onMouseUp);
   }
 
-  function buildStraightExportRows() {
-    return filteredRows.map((row) => {
-      const exportRow: Record<string, any> = {};
-
-      selectedDimensions.forEach((field) => {
-        exportRow[getDisplayLabel(field)] = row[field] ?? '';
-      });
-
-      selectedMeasures.forEach((field) => {
-        exportRow[getDisplayLabel(field)] = parseNumber(row[field]);
-      });
-
-      return exportRow;
-    });
-  }
-
-  function buildPivotExportRowsFromNodes(nodesToExport: VisibleNode[]) {
-    return nodesToExport.map((node) => {
-      const exportRow: Record<string, any> = {};
-
-      selectedDimensions.forEach((field, index) => {
-        exportRow[getDisplayLabel(field)] = node.pathValues[index] ?? '';
-      });
-
-      selectedMeasures.forEach((field) => {
-        exportRow[getDisplayLabel(field)] = node.measures[field] ?? 0;
-      });
-
-      return exportRow;
-    });
-  }
-
   function exportRowsToExcel(rows: Record<string, any>[]) {
     if (typeof XLSX === 'undefined') {
       setMessage('Excel export library is not available.');
@@ -1481,19 +1986,6 @@ export default function App() {
     XLSX.utils.book_append_sheet(workbook, worksheet, sanitizeSheetName('Report Builder'));
     XLSX.writeFile(workbook, 'report-builder-export.xlsx');
     setMessage('');
-  }
-
-  function exportCurrentView() {
-    if (selectedMeasures.length === 0) {
-      setMessage('Please select at least one metric.');
-      return;
-    }
-
-    if (viewMode === 'pivot') {
-      exportRowsToExcel(buildPivotExportRowsFromNodes(flattenAllNodes(treeRoots)));
-    } else {
-      exportRowsToExcel(buildStraightExportRows());
-    }
   }
 
   function renderToolbarDropdown(
@@ -2327,29 +2819,6 @@ export default function App() {
     );
   }
 
-  {editingFieldLabel && (
-    <div
-      style={{
-        position: 'fixed',
-        top: '20px',
-        right: '20px',
-        zIndex: 99999,
-        width: '280px',
-        padding: '12px',
-        border: '2px solid red',
-        borderRadius: '10px',
-        background: '#fff'
-      }}
-    >
-      <div>Editing: {editingFieldLabel}</div>
-      <input
-        type="text"
-        value={editingFieldValue}
-        onChange={(e) => setEditingFieldValue(e.target.value)}
-      />
-    </div>
-  )}
-
   function renderPivotTable() {
     return (
       <div style={{ width: '100%', height: '100%', overflow: 'auto' }}>
@@ -2512,204 +2981,359 @@ export default function App() {
     );
   }
 
-  function renderStraightTable() {
-  return (
-    <div style={{ width: '100%', height: '100%', overflow: 'auto' }}>
-      <table
+  type StraightGridCellExtraProps = {
+    rows: PreviewRow[];
+    columns: Array<{
+      key: string;
+      label: string;
+      width: number;
+      kind: 'dimension' | 'measure';
+    }>;
+    formatMeasureValue: (field: string, value: number) => string;
+    parseNumber: (value: any) => number;
+  };
+
+  type StraightGridCellProps = {
+    ariaAttributes?: React.HTMLAttributes<HTMLDivElement>;
+    columnIndex: number;
+    rowIndex: number;
+    style: React.CSSProperties;
+  } & StraightGridCellExtraProps;
+
+  const StraightGridCell = ({
+    ariaAttributes,
+    columnIndex,
+    rowIndex,
+    style,
+    rows,
+    columns,
+    formatMeasureValue,
+    parseNumber
+  }: StraightGridCellProps) => {
+    const row = rows[rowIndex];
+    const column = columns[columnIndex];
+
+    if (!row || !column) return null;
+
+    const isEven = rowIndex % 2 === 0;
+    const field = column.key;
+    const isMeasure = column.kind === 'measure';
+
+    return (
+      <div
+        {...ariaAttributes}
         style={{
-          borderCollapse: 'collapse',
-          width: 'max-content',
-          minWidth: '100%',
-          tableLayout: 'fixed'
+          ...style,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: isMeasure ? 'flex-end' : 'flex-start',
+          padding: '8px 10px',
+          fontSize: '12px',
+          background: isEven ? '#ffffff' : '#f7fafc',
+          borderRight: '1px solid #e8edf3',
+          borderBottom: '1px solid #e8edf3',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          boxSizing: 'border-box'
         }}
       >
-        <thead>
-          <tr>
-            {selectedDimensions.map((field) => (
-              <th
-                key={field}
-                style={{
-                  background: '#075b67',
-                  color: '#fff',
-                  border: '1px solid #dce4ec',
-                  padding: '8px 10px',
-                  textAlign: 'left',
-                  fontSize: '12px'
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '8px'
-                  }}
-                >
-                  <button
-                    type="button"
-                    onClick={() => toggleSort(field)}
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      background: 'transparent',
-                      border: 'none',
-                      color: '#fff',
-                      fontSize: '12px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      padding: 0
-                    }}
-                  >
-                    <span
+        {isMeasure
+          ? formatMeasureValue(field, parseNumber(row[field]))
+          : row[field] ?? ''}
+      </div>
+    );
+  };
+
+  const straightGridCellProps: StraightGridCellExtraProps = {
+    rows: sortedStraightRows,
+    columns: straightTableColumns,
+    formatMeasureValue,
+    parseNumber
+  };
+
+  const gridWidth = straightTableViewportSize.width;
+  const gridHeight = Math.max(
+    120,
+    straightTableViewportSize.height - STRAIGHT_HEADER_HEIGHT
+  );
+
+  useEffect(() => {
+    const viewport = straightTableViewportRef.current;
+    if (!viewport || !straightTableHeaderContentRef.current) return;
+
+    const element =
+      ((straightTableGridRef.current as any)?.element ??
+        (straightTableGridRef.current as any)?._outerRef ??
+        viewport.querySelector('[role="grid"], [data-testid="virtuoso-scroller"], div[style*="overflow"]')) as HTMLDivElement | null;
+
+    if (!element) return;
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (straightTableHeaderContentRef.current) {
+          straightTableHeaderContentRef.current.style.transform =
+            `translateX(${-element.scrollLeft}px)`;
+        }
+      });
+    });
+  }, [loadedRows.length, gridWidth, gridHeight, straightTableColumns.length]);
+
+  function renderStraightTable() {
+    
+    return (
+      <div
+        ref={straightTableViewportRef}
+        style={{
+          width: '100%',
+          height: '100%',
+          overflow: 'hidden',
+          minWidth: 0,
+          minHeight: 0
+        }}
+      >
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            overflow: 'hidden',
+            //border: '1px solid #dce4ec',
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+            minWidth: 0,
+            background: '#ffffff',
+            marginRight: '10px'
+          }}
+        >
+          <div
+            ref={straightTableHeaderRef}
+            onScroll={(e) => {
+              const left = e.currentTarget.scrollLeft;
+              const body =
+                ((straightTableGridRef.current as any)?.element ??
+                  (straightTableGridRef.current as any)?._outerRef) as HTMLDivElement | null;
+
+              if (body && body.scrollLeft !== left) {
+                body.scrollLeft = left;
+              }
+            }}
+            style={{
+              overflowX: 'auto',
+              overflowY: 'hidden',
+              borderBottom: '1px solid #dce4ec',
+              background: '#075b67',
+              flex: '0 0 auto',
+              scrollbarWidth: 'none',
+              marginRight: '20px'
+            }}
+          >
+            <div
+              ref={straightTableHeaderContentRef}
+              style={{
+                width: straightTableTotalWidth,
+                minWidth: straightTableTotalWidth,
+                display: 'flex',
+                minHeight: STRAIGHT_HEADER_HEIGHT,
+                color: '#fff',
+                marginRight: '10px'
+              }}
+            >
+              {straightTableColumns.map((column, columnIndex) => {
+                const field = column.key;
+                const resolvedWidth = getStraightTableColumnWidth(columnIndex);
+
+                if (column.kind === 'dimension') {
+                  return (
+                    <div
+                      key={field}
                       style={{
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap'
+                        width: resolvedWidth,
+                        minWidth: resolvedWidth,
+                        maxWidth: resolvedWidth,
+                        padding: '8px 10px',
+                        borderRight: '1px solid #dce4ec',
+                        fontSize: '12px',
+                        boxSizing: 'border-box'
                       }}
                     >
-                      {getDisplayLabel(field)}
-                    </span>
-                    <span>
-                      {sortConfig?.field === field
-                        ? sortConfig.direction === 'asc'
-                          ? '▲'
-                          : '▼'
-                        : '↕'}
-                    </span>
-                  </button>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '8px'
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => toggleSort(field)}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#fff',
+                            fontSize: '12px',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            padding: 0
+                          }}
+                        >
+                          <span
+                            style={{
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap'
+                            }}
+                          >
+                            {column.label}
+                          </span>
+                          <span>
+                            {sortConfig?.field === field
+                              ? sortConfig.direction === 'asc'
+                                ? '▲'
+                                : '▼'
+                              : '↕'}
+                          </span>
+                        </button>
 
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                      setColumnFilterSearch('');
-                      setHeaderFilterMenu({ field, anchorRect: rect });
-                    }}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            const rect = (
+                              e.currentTarget as HTMLButtonElement
+                            ).getBoundingClientRect();
+                            setColumnFilterSearch('');
+                            setHeaderFilterMenu({ field, anchorRect: rect });
+                          }}
+                          style={{
+                            width: '20px',
+                            height: '20px',
+                            border: 'none',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            padding: 0,
+                            color: '#ffffff',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0
+                          }}
+                          aria-label={`Filter ${column.label}`}
+                          title={`Filter ${column.label}`}
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <circle cx="11" cy="11" r="7" />
+                            <path d="M20 20l-3.5-3.5" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div
+                    key={field}
                     style={{
-                      width: '18px',
-                      height: '18px',
-                      border: 'none',
-                      background: 'transparent',
-                      cursor: 'pointer',
-                      padding: 0,
-                      color: '#ffffff',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexShrink: 0
+                      width: resolvedWidth,
+                      minWidth: resolvedWidth,
+                      maxWidth: resolvedWidth,
+                      padding: '8px 10px',
+                      borderRight: '1px solid #dce4ec',
+                      fontSize: '12px',
+                      boxSizing: 'border-box'
                     }}
-                    aria-label={`Filter ${getDisplayLabel(field)}`}
-                    title={`Filter ${getDisplayLabel(field)}`}
                   >
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      width="14"
-                      height="14"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
+                    <button
+                      type="button"
+                      onClick={() => toggleSort(field)}
+                      style={{
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        background: 'transparent',
+                        border: 'none',
+                        color: '#fff',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        padding: 0
+                      }}
                     >
-                      <circle cx="11" cy="11" r="7" />
-                      <path d="M20 20l-3.5-3.5" />
-                    </svg>
-                  </button>
-                </div>
-              </th>
-            ))}
+                      <span
+                        style={{
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}
+                      >
+                        {column.label}
+                      </span>
+                      <span>
+                        {sortConfig?.field === field
+                          ? sortConfig.direction === 'asc'
+                            ? '▲'
+                            : '▼'
+                          : '↕'}
+                      </span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
-            {selectedMeasures.map((field) => (
-              <th
-                key={field}
+          <div
+            style={{
+              flex: '1 1 auto',
+              minHeight: 0,
+              minWidth: 0
+            }}
+          >
+            {gridWidth > 0 && gridHeight > 0 && straightTableColumns.length > 0 ? (
+              <Grid
+                gridRef={straightTableGridRef}
+                cellComponent={StraightGridCell}
+                cellProps={straightGridCellProps as any}
+                columnCount={straightTableColumns.length}
+                columnWidth={getStraightTableColumnWidth}
+                rowCount={sortedStraightRows.length}
+                rowHeight={() => STRAIGHT_ROW_HEIGHT}
+                defaultHeight={gridHeight}
+                defaultWidth={gridWidth}
+                overscanCount={8}
+                onScroll={handleStraightTableGridScroll}
                 style={{
-                  background: '#075b67',
-                  color: '#fff',
-                  border: '1px solid #dce4ec',
-                  padding: '8px 10px',
-                  textAlign: 'right',
-                  fontSize: '12px'
+                  width: gridWidth,
+                  height: gridHeight
                 }}
-              >
-                <button
-                  type="button"
-                  onClick={() => toggleSort(field)}
-                  style={{
-                    width: '100%',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    background: 'transparent',
-                    border: 'none',
-                    color: '#fff',
-                    fontSize: '12px',
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                    padding: 0
-                  }}
-                >
-                  <span>{getDisplayLabel(field)}</span>
-                  <span>
-                    {sortConfig?.field === field
-                      ? sortConfig.direction === 'asc'
-                        ? '▲'
-                        : '▼'
-                      : '↕'}
-                  </span>
-                </button>
-              </th>
-            ))}
-          </tr>
-        </thead>
-
-        <tbody>
-          {sortedStraightRows.map((row, index) => (
-            <tr key={index}>
-              {selectedDimensions.map((field) => (
-                <td
-                  key={field}
-                  style={{
-                    border: '1px solid #e8edf3',
-                    background: index % 2 === 0 ? '#ffffff' : '#f7fafc',
-                    padding: '8px 10px',
-                    fontSize: '12px'
-                  }}
-                >
-                  {row[field] ?? ''}
-                </td>
-              ))}
-
-              {selectedMeasures.map((field) => (
-                <td
-                  key={field}
-                  style={{
-                    border: '1px solid #e8edf3',
-                    background: index % 2 === 0 ? '#ffffff' : '#f7fafc',
-                    padding: '8px 10px',
-                    textAlign: 'right',
-                    whiteSpace: 'nowrap',
-                    fontSize: '12px'
-                  }}
-                >
-                  {formatMeasureValue(field, parseNumber(row[field]))}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+              />
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-
-  <div
+    <div
       style={{
         width: '100%',
         height: '100vh',
@@ -2798,7 +3422,6 @@ export default function App() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   saveFieldLabel(editingFieldLabel);
-                  cancelFieldLabelEdit();
                 }
                 if (e.key === 'Escape') {
                   cancelFieldLabelEdit();
@@ -2839,10 +3462,7 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => {
-                  saveFieldLabel(editingFieldLabel);
-                  cancelFieldLabelEdit();
-                }}
+                onClick={() => saveFieldLabel(editingFieldLabel)}
                 style={{
                   height: '32px',
                   padding: '0 12px',
@@ -3010,39 +3630,144 @@ export default function App() {
           </div>
 
           <div style={{ display: 'grid', gap: '8px' }}>
-            <button
-              type="button"
-              onClick={exportCurrentView}
-              style={{
-                height: '38px',
-                padding: '0 14px',
-                border: 'none',
-                borderRadius: '8px',
-                background: 'linear-gradient(180deg, #24c5c0 0%, #16b3ad 100%)',
-                color: '#fff',
-                fontSize: '12px',
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px'
-              }}
-            >
-              <img
-                src={exportIcon}
-                alt=""
-                aria-hidden="true"
-                style={{
-                  width: '14px',
-                  height: '14px',
-                  display: 'block',
-                  objectFit: 'contain'
-                }}
-              />
-              <span>Export Report</span>
-              <span aria-hidden="true" style={{ fontSize: '10px', lineHeight: 1 }}>▼</span>
-            </button>
+            <div style={{ position: 'relative' }} ref={exportMenuRef}>
+              {viewMode === 'straight' ? (
+                <button
+                  type="button"
+                  onClick={handleExportStraightTable}
+                  style={{
+                    height: '38px',
+                    padding: '0 14px',
+                    border: 'none',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(180deg, #24c5c0 0%, #16b3ad 100%)',
+                    color: '#fff',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px'
+                  }}
+                >
+                  <img
+                    src={exportIcon}
+                    alt=""
+                    aria-hidden="true"
+                    style={{
+                      width: '14px',
+                      height: '14px',
+                      display: 'block',
+                      objectFit: 'contain'
+                    }}
+                  />
+                  <span>Export Report</span>
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setExportMenuOpen((prev) => !prev)}
+                    style={{
+                      height: '38px',
+                      padding: '0 14px',
+                      border: 'none',
+                      borderRadius: '8px',
+                      background: 'linear-gradient(180deg, #24c5c0 0%, #16b3ad 100%)',
+                      color: '#fff',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px'
+                    }}
+                  >
+                    <img
+                      src={exportIcon}
+                      alt=""
+                      aria-hidden="true"
+                      style={{
+                        width: '14px',
+                        height: '14px',
+                        display: 'block',
+                        objectFit: 'contain'
+                      }}
+                    />
+                    <span>Export Report</span>
+                    <span aria-hidden="true" style={{ fontSize: '10px', lineHeight: 1 }}>
+                      {exportMenuOpen ? '▲' : '▼'}
+                    </span>
+                  </button>
+
+                  {exportMenuOpen && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: '44px',
+                        right: 0,
+                        minWidth: '220px',
+                        background: '#fff',
+                        border: '1px solid #d6dee7',
+                        borderRadius: '12px',
+                        boxShadow: '0 16px 36px rgba(15, 23, 42, 0.14)',
+                        padding: '8px',
+                        zIndex: 120
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setExportMenuOpen(false);
+                          await handleExportPivotExpanded();
+                        }}
+                        style={{
+                          width: '100%',
+                          height: '40px',
+                          border: 'none',
+                          borderRadius: '8px',
+                          background: '#f7f9fc',
+                          color: '#0f172a',
+                          fontSize: '12px',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          padding: '0 12px'
+                        }}
+                      >
+                        Export Fully Expanded Pivot
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setExportMenuOpen(false);
+                          await handleExportPivotRawData();
+                        }}
+                        style={{
+                          width: '100%',
+                          height: '40px',
+                          border: 'none',
+                          borderRadius: '8px',
+                          background: '#ffffff',
+                          color: '#0f172a',
+                          fontSize: '12px',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          padding: '0 12px',
+                          marginTop: '6px'
+                        }}
+                      >
+                        Export Raw Data
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
 
             <button
               type="button"
@@ -3239,9 +3964,9 @@ export default function App() {
         </div>
       </div>
 
-      {message && (
+      {(message || isPartialData) && (
         <div style={{ flex: '0 0 auto', margin: '0 18px 10px', color: '#b00020', fontSize: '13px' }}>
-          {message}
+          {message || `Loaded ${loadedRows.length.toLocaleString()} of ${totalAvailableRows.toLocaleString()} rows for performance.`}
         </div>
       )}
 
@@ -3325,7 +4050,7 @@ export default function App() {
                     ? renderSelectionPill(`${dateRange.start || '...'} - ${dateRange.end || '...'}`, '#065f73')
                     : <div style={{ fontSize: '12px', color: '#94a3b8' }}>Not set</div>}
                 </div>
-                
+
                 <div style={{ marginBottom: '14px' }}>
                   <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
                     Dimensions:
@@ -3360,7 +4085,7 @@ export default function App() {
                         {renderSelectionPill(getDisplayLabel(field), '#065f73', {
                           onMoveUp: () => moveMeasure(field, 'up'),
                           onMoveDown: () => moveMeasure(field, 'down'),
-                          onEdit: () => beginEditFieldLabel(field),
+                          onEdit: () => startEditingFieldLabel(field),
                           onRemove: () => toggleMeasure(field),
                           disableMoveUp: index === 0,
                           disableMoveDown: index === selectedMeasures.length - 1
@@ -3373,39 +4098,39 @@ export default function App() {
                 </div>
 
                 <div style={{ marginBottom: '14px' }}>
-                <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
-                  Active Filters:
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
+                    Active Filters:
+                  </div>
+                  {filters.length > 0
+                    ? filters.map((filter) => (
+                        <div key={filter.field}>
+                          {renderSelectionPill(
+                            `${getDisplayLabel(filter.field)}: ${filter.values.join(', ')}`,
+                            '#065f73',
+                            { onRemove: () => removeFilter(filter.field) }
+                          )}
+                        </div>
+                      ))
+                    : <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '12px' }}>None applied</div>}
                 </div>
-                {filters.length > 0
-                  ? filters.map((filter) => (
-                      <div key={filter.field}>
-                        {renderSelectionPill(
-                          `${getDisplayLabel(filter.field)}: ${filter.values.join(', ')}`,
-                          '#065f73',
-                          { onRemove: () => removeFilter(filter.field) }
-                        )}
-                      </div>
-                    ))
-                  : <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '12px' }}>None applied</div>}
-              </div>
 
-              <button
-                type="button"
-                onClick={clearAllSelections}
-                style={{
-                  width: '100%',
-                  height: '32px',
-                  border: '1px solid #d8e2ee',
-                  borderRadius: '8px',
-                  background: '#fff7ed',
-                  color: '#c2410c',
-                  fontSize: '12px',
-                  fontWeight: 700,
-                  cursor: 'pointer'
-                }}
-              >
-                Clear All
-              </button>
+                <button
+                  type="button"
+                  onClick={clearAllSelections}
+                  style={{
+                    width: '100%',
+                    height: '32px',
+                    border: '1px solid #d8e2ee',
+                    borderRadius: '8px',
+                    background: '#fff7ed',
+                    color: '#c2410c',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: 'pointer'
+                  }}
+                >
+                  Clear All
+                </button>
               </div>
             </div>
           ) : (
@@ -3479,6 +4204,34 @@ export default function App() {
               Pivot Table
             </button>
           </div>
+
+          <div
+            style={{
+              fontSize: '12px',
+              color: '#6b7280',
+              marginBottom: '8px',
+              padding: '6px 10px',
+              border: '1px solid #e5e7eb',
+              borderRadius: '8px',
+              background: '#f8fafc'
+            }}
+          >
+            {isLoadingData
+              ? 'Loading data...'
+              : hasActiveFilters
+                ? isPartialData
+                  ? `Showing ${visibleRowCount.toLocaleString()} matching rows (${loadedRowCount.toLocaleString()} loaded of ${availableRowCount.toLocaleString()} available)`
+                  : `Showing ${visibleRowCount.toLocaleString()} matching rows`
+                : isPartialData
+                  ? `Showing ${loadedRowCount.toLocaleString()} loaded rows of ${availableRowCount.toLocaleString()} available`
+                  : `${loadedRowCount.toLocaleString()} rows loaded`}
+          </div>
+
+          {isLoadingNextPage && (
+            <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '8px' }}>
+              Loading more rows...
+            </div>
+          )}
 
           <div
             style={{
