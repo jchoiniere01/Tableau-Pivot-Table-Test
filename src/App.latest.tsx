@@ -1,3 +1,6 @@
+// app.latest.tsx
+// Modern Tableau build: use getSummaryDataReaderAsync and DataTableReader paging
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import exportIcon from './assets/icons/export-icon.png';
 import { Grid } from 'react-window';
@@ -1033,7 +1036,7 @@ export default function App() {
   }
 
   async function configure() {
-    const popupUrl = `${window.location.origin}/configure.html`;
+    const popupUrl = `${window.location.origin}/configure.latest.html`;
     const payload = JSON.stringify({
       worksheets,
       fields: availableFields

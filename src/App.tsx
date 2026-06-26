@@ -1,3 +1,6 @@
+// app.tsx
+// Legacy-compatible Tableau build: use getSummaryDataAsync only
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import exportIcon from './assets/icons/export-icon.png';
 import { Grid } from 'react-window';
@@ -134,10 +137,7 @@ const DATE_PRESETS = [
   'This Year'
 ];
 
-const PAGE_SIZE = 5000;
 const MAX_PIVOT_ROWS = 25000;
-const INITIAL_PAGE_COUNT = 3;
-const LOAD_MORE_THRESHOLD_PX = 300;
 const STRAIGHT_ROW_HEIGHT = 36;
 const STRAIGHT_HEADER_HEIGHT = 38;
 
@@ -578,16 +578,12 @@ export default function App() {
   const [filters, setFilters] = useState<SimpleFilterState[]>([]);
   const [openNestedFilterGroups, setOpenNestedFilterGroups] = useState<Record<string, boolean>>({});
 
-  const readerMapRef = useRef<Record<string, any>>({});
   const fieldMapRef = useRef<WorksheetFieldsMap>({});
-  const nextPageByWorksheetRef = useRef<Record<string, number>>({});
 
   const [loadedRows, setLoadedRows] = useState<PreviewRow[]>([]);
   const [totalAvailableRows, setTotalAvailableRows] = useState(0);
   const [isPartialData, setIsPartialData] = useState(false);
   const [isLoadingData, setIsLoadingData] = useState(false);
-  const [isLoadingNextPage, setIsLoadingNextPage] = useState(false);
-  const [hasMorePages, setHasMorePages] = useState(false);
 
   const [treeRoots, setTreeRoots] = useState<TreeNode[]>([]);
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
@@ -627,21 +623,8 @@ export default function App() {
       if (straightTableHeaderRef.current && straightTableHeaderRef.current.scrollLeft !== left) {
         straightTableHeaderRef.current.scrollLeft = left;
       }
-
-      const totalContentHeight = loadedRows.length * STRAIGHT_ROW_HEIGHT;
-      const viewportHeight = body.clientHeight;
-      const distanceFromBottom =
-        totalContentHeight - body.scrollTop - viewportHeight;
-
-      if (
-        distanceFromBottom <= LOAD_MORE_THRESHOLD_PX &&
-        hasMorePages &&
-        !isLoadingNextPage
-      ) {
-        loadNextPage();
-      }
     },
-    [loadedRows.length, hasMorePages, isLoadingNextPage, loadNextPage]
+    []
   );
   
   const [straightTableViewportSize, setStraightTableViewportSize] = useState({
@@ -682,23 +665,6 @@ export default function App() {
   const getStraightTableColumnWidth = (index: number) =>
     straightTableColumns[index]?.width ?? 140;
 
-  async function releaseReaders() {
-    const readers = Object.values(readerMapRef.current);
-
-    await Promise.all(
-      readers.map(async (reader: any) => {
-        try {
-          await reader.releaseAsync();
-        } catch {
-          //
-        }
-      })
-    );
-
-    readerMapRef.current = {};
-    nextPageByWorksheetRef.current = {};
-  }
-
   const straightTableTotalWidth = useMemo(() => {
     return straightTableColumns.reduce(
       (_, __, index) => _ + getStraightTableColumnWidth(index),
@@ -706,41 +672,13 @@ export default function App() {
     );
   }, [straightTableColumns, layoutSettings, selectedDimensions, selectedMeasures]);
 
-  function updateHasMorePages(sourceNames: string[]) {
-    const next = sourceNames.some((worksheetName) => {
-      const reader = readerMapRef.current[worksheetName];
-      const nextPage = nextPageByWorksheetRef.current[worksheetName] ?? 0;
-      return !!reader && nextPage < reader.pageCount;
-    });
-
-    setHasMorePages(next);
-  }
-
-  async function initializeWorksheetReader(
-    worksheet: any,
-    initialPageCount = INITIAL_PAGE_COUNT
+  async function loadWorksheetSummaryLegacy(
+    worksheet: any
   ): Promise<{ rows: PreviewRow[]; fields: FieldMeta[]; totalRowCount: number }> {
-    const reader = await worksheet.getSummaryDataReaderAsync(PAGE_SIZE);
-
-    readerMapRef.current[worksheet.name] = reader;
-
-    const totalRowCount = reader.totalRowCount;
-    const pagesToLoad = Math.min(reader.pageCount, initialPageCount);
-
-    let fields: FieldMeta[] = [];
-    const rows: PreviewRow[] = [];
-
-    for (let pageNumber = 0; pageNumber < pagesToLoad; pageNumber++) {
-      const page = await reader.getPageAsync(pageNumber);
-
-      if (fields.length === 0) {
-        fields = buildFieldMeta(page.columns);
-      }
-
-      rows.push(...dataTableToRows(page, worksheet.name));
-    }
-
-    nextPageByWorksheetRef.current[worksheet.name] = pagesToLoad;
+    const table = await worksheet.getSummaryDataAsync({ maxRows: 0 });
+    const fields = buildFieldMeta(table.columns);
+    const rows = dataTableToRows(table, worksheet.name);
+    const totalRowCount = rows.length;
 
     return { rows, fields, totalRowCount };
   }
@@ -748,33 +686,12 @@ export default function App() {
   async function loadAllWorksheetRowsForExport(
     worksheet: any
   ): Promise<{ rows: PreviewRow[]; fields: FieldMeta[]; totalRowCount: number }> {
-    const reader = await worksheet.getSummaryDataReaderAsync(PAGE_SIZE);
+    const table = await worksheet.getSummaryDataAsync({ maxRows: 0 });
+    const fields = buildFieldMeta(table.columns);
+    const rows = dataTableToRows(table, worksheet.name);
+    const totalRowCount = rows.length;
 
-    try {
-      const totalRowCount = reader.totalRowCount;
-      const pageCount = reader.pageCount;
-
-      let fields: FieldMeta[] = [];
-      const rows: PreviewRow[] = [];
-
-      for (let pageNumber = 0; pageNumber < pageCount; pageNumber++) {
-        const page = await reader.getPageAsync(pageNumber);
-
-        if (fields.length === 0) {
-          fields = buildFieldMeta(page.columns);
-        }
-
-        rows.push(...dataTableToRows(page, worksheet.name));
-      }
-
-      return { rows, fields, totalRowCount };
-    } finally {
-      try {
-        await reader.releaseAsync();
-      } catch {
-        //
-      }
-    }
+    return { rows, fields, totalRowCount };
   }
 
   function buildStraightExportRowsFromRows(rows: any[]) {
@@ -1525,106 +1442,65 @@ export default function App() {
     });
   }
 
-  async function loadAllSelectedWorksheets(sourceNames: string[], isRefresh = false) {
-    if (!sourceNames.length) {
-      await releaseReaders();
-      setLoadedRows([]);
-      setAvailableFields([]);
-      setTotalAvailableRows(0);
-      setIsPartialData(false);
-      setHasMorePages(false);
-      setMessage('Select at least one data source.');
-      return;
-    }
-
-    const dashboard = tableau.extensions.dashboardContent.dashboard;
-    const selectedWorksheets = dashboard.worksheets.filter((w: any) => sourceNames.includes(w.name));
-
-    if (!isRefresh) setMessage('Loading data...');
-    setIsLoadingData(true);
-
-    try {
-      await releaseReaders();
-
-      const results = await Promise.all(
-        selectedWorksheets.map((worksheet: any) => initializeWorksheetReader(worksheet))
-      );
-
-      const mergedRows = results.flatMap((r) => r.rows);
-      const totalRows = results.reduce((sum, r) => sum + r.totalRowCount, 0);
-      const partial = mergedRows.length < totalRows;
-
-      const nextWorksheetFields: WorksheetFieldsMap = {};
-      selectedWorksheets.forEach((worksheet: any, index: number) => {
-        nextWorksheetFields[worksheet.name] = results[index].fields;
-      });
-
-      fieldMapRef.current = nextWorksheetFields;
-
-      setLoadedRows(mergedRows);
-      setTotalAvailableRows(totalRows);
-      setIsPartialData(partial);
-
-      setWorksheetFields((prev) => {
-        const combined = { ...prev, ...nextWorksheetFields };
-        rebuildFieldsFromSelectedSources(sourceNames, combined, fieldRoleOverrides);
-        return combined;
-      });
-
-      setExpandedWorksheetFields((prev) => {
-        const next = { ...prev };
-        sourceNames.forEach((name) => {
-          if (next[name] === undefined) next[name] = false;
-        });
-        return next;
-      });
-
-      updateHasMorePages(sourceNames);
-      await registerWorksheetListeners(sourceNames);
-
-      setMessage('');
-    } catch (error: any) {
-      setMessage(`Load error: ${error?.message || error}`);
-    } finally {
-      setIsLoadingData(false);
-    }
-  }
-
-  async function loadNextPage() {
-    if (isLoadingNextPage || !hasMorePages || selectedSources.length === 0) return;
-
-    setIsLoadingNextPage(true);
-
-    try {
-      const pageResults = await Promise.all(
-        selectedSources.map(async (worksheetName) => {
-          const reader = readerMapRef.current[worksheetName];
-          const nextPage = nextPageByWorksheetRef.current[worksheetName] ?? 0;
-
-          if (!reader || nextPage >= reader.pageCount) {
-            return [];
-          }
-
-          const page = await reader.getPageAsync(nextPage);
-          nextPageByWorksheetRef.current[worksheetName] = nextPage + 1;
-
-          return dataTableToRows(page, worksheetName);
-        })
-      );
-
-      const appendedRows = pageResults.flat();
-
-      if (appendedRows.length > 0) {
-        setLoadedRows((prev) => [...prev, ...appendedRows]);
+    async function loadAllSelectedWorksheets(sourceNames: string[], isRefresh = false) {
+      if (!sourceNames.length) {
+        setLoadedRows([]);
+        setAvailableFields([]);
+        setTotalAvailableRows(0);
+        setIsPartialData(false);
+        setMessage('Select at least one data source.');
+        return;
       }
 
-      updateHasMorePages(selectedSources);
-    } catch (error: any) {
-      setMessage(`Load more error: ${error?.message || error}`);
-    } finally {
-      setIsLoadingNextPage(false);
+      const dashboard = tableau.extensions.dashboardContent.dashboard;
+      const selectedWorksheets = dashboard.worksheets.filter((w: any) =>
+        sourceNames.includes(w.name)
+      );
+
+      if (!isRefresh) setMessage('Loading data...');
+      setIsLoadingData(true);
+
+      try {
+        const results = await Promise.all(
+          selectedWorksheets.map((worksheet: any) => loadWorksheetSummaryLegacy(worksheet))
+        );
+
+        const mergedRows = results.flatMap((r) => r.rows);
+        const totalRows = results.reduce((sum, r) => sum + r.totalRowCount, 0);
+
+        const nextWorksheetFields: WorksheetFieldsMap = {};
+        selectedWorksheets.forEach((worksheet: any, index: number) => {
+          nextWorksheetFields[worksheet.name] = results[index].fields;
+        });
+
+        fieldMapRef.current = nextWorksheetFields;
+
+        setLoadedRows(mergedRows);
+        setTotalAvailableRows(totalRows);
+        setIsPartialData(false);
+
+        setWorksheetFields((prev) => {
+          const combined = { ...prev, ...nextWorksheetFields };
+          rebuildFieldsFromSelectedSources(sourceNames, combined, fieldRoleOverrides);
+          return combined;
+        });
+
+        setExpandedWorksheetFields((prev) => {
+          const next = { ...prev };
+          sourceNames.forEach((name) => {
+            if (next[name] === undefined) next[name] = false;
+          });
+          return next;
+        });
+
+        await registerWorksheetListeners(sourceNames);
+        setMessage('');
+      } catch (error: any) {
+        setMessage(`Load error: ${error?.message || error}`);
+      } finally {
+        setIsLoadingData(false);
+      }
     }
-  }
 
   useEffect(() => {
     async function init() {
@@ -1690,6 +1566,8 @@ export default function App() {
     } else {
       setLoadedRows([]);
       setAvailableFields([]);
+      setTotalAvailableRows(0);
+      setIsPartialData(false);
     }
   }, [selectedSources]);
 
@@ -3108,18 +2986,8 @@ export default function App() {
         >
           <div
             ref={straightTableHeaderRef}
-            onScroll={(e) => {
-              const left = e.currentTarget.scrollLeft;
-              const body =
-                ((straightTableGridRef.current as any)?.element ??
-                  (straightTableGridRef.current as any)?._outerRef) as HTMLDivElement | null;
-
-              if (body && body.scrollLeft !== left) {
-                body.scrollLeft = left;
-              }
-            }}
-            style={{
-              overflowX: 'auto',
+              style={{
+              overflowX: 'hidden',
               overflowY: 'hidden',
               borderBottom: '1px solid #dce4ec',
               background: '#075b67',
@@ -3964,9 +3832,9 @@ export default function App() {
         </div>
       </div>
 
-      {(message || isPartialData) && (
+      {message && (
         <div style={{ flex: '0 0 auto', margin: '0 18px 10px', color: '#b00020', fontSize: '13px' }}>
-          {message || `Loaded ${loadedRows.length.toLocaleString()} of ${totalAvailableRows.toLocaleString()} rows for performance.`}
+          {message}
         </div>
       )}
 
@@ -4219,19 +4087,9 @@ export default function App() {
             {isLoadingData
               ? 'Loading data...'
               : hasActiveFilters
-                ? isPartialData
-                  ? `Showing ${visibleRowCount.toLocaleString()} matching rows (${loadedRowCount.toLocaleString()} loaded of ${availableRowCount.toLocaleString()} available)`
-                  : `Showing ${visibleRowCount.toLocaleString()} matching rows`
-                : isPartialData
-                  ? `Showing ${loadedRowCount.toLocaleString()} loaded rows of ${availableRowCount.toLocaleString()} available`
-                  : `${loadedRowCount.toLocaleString()} rows loaded`}
+                ? `Showing ${visibleRowCount.toLocaleString()} matching rows`
+                : `${loadedRowCount.toLocaleString()} rows loaded`}
           </div>
-
-          {isLoadingNextPage && (
-            <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '8px' }}>
-              Loading more rows...
-            </div>
-          )}
 
           <div
             style={{
