@@ -1866,6 +1866,8 @@ export default function App() {
     setMessage('');
   }
 
+  const [filterGroupSearch, setFilterGroupSearch] = useState<Record<string, string>>({});
+
   function renderToolbarDropdown(
     label: string,
     icon: string,
@@ -1942,7 +1944,7 @@ export default function App() {
           type="button"
           onClick={() => setFieldOverride(worksheetName, field.fieldName, 'dimension')}
           style={{
-            minWidth: '132px',
+            minWidth: '86px',
             height: '32px',
             border: '2px solid #222',
             background: isDimension ? '#eef6ff' : '#ffffff',
@@ -2463,6 +2465,11 @@ export default function App() {
   function renderFilterValueDropdown(group: FilterGroupDefinition) {
     const open = !!openNestedFilterGroups[group.field];
     const selectedCount = filters.find((f) => f.field === group.field)?.values.length || 0;
+    const search = filterGroupSearch[group.field] || '';
+
+    const visibleOptions = group.options.filter((option) =>
+      option.toLowerCase().includes(search.trim().toLowerCase())
+    );
 
     return (
       <div
@@ -2493,30 +2500,71 @@ export default function App() {
 
         {open && (
           <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>
-            {group.options.map((option) => {
-              const selected = isFilterValueSelected(group.field, option);
-              return (
-                <label
-                  key={option}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    padding: '8px 10px',
-                    borderRadius: '10px',
-                    background: selected ? '#eef0ff' : '#f5f7fb',
-                    cursor: 'pointer'
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selected}
-                    onChange={() => toggleFilterValue(group.field, option)}
-                  />
-                  <span style={{ fontSize: '13px', color: '#374151', fontWeight: 600 }}>{option}</span>
-                </label>
-              );
-            })}
+            <input
+              type="text"
+              value={search}
+              onChange={(e) =>
+                setFilterGroupSearch((prev) => ({
+                  ...prev,
+                  [group.field]: e.target.value
+                }))
+              }
+              onKeyDown={(e) => e.stopPropagation()}
+              placeholder="Search values..."
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                border: '1px solid #d7deea',
+                borderRadius: '8px',
+                fontSize: '13px',
+                background: '#ffffff',
+                color: '#374151',
+                boxSizing: 'border-box'
+              }}
+            />
+
+            <div
+              style={{
+                maxHeight: '240px',
+                overflowY: 'auto',
+                display: 'grid',
+                gap: '8px',
+                paddingRight: '4px'
+              }}
+            >
+              {visibleOptions.map((option) => {
+                const selected = isFilterValueSelected(group.field, option);
+                return (
+                  <label
+                    key={option}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      padding: '8px 10px',
+                      borderRadius: '10px',
+                      background: selected ? '#eef0ff' : '#f5f7fb',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={() => toggleFilterValue(group.field, option)}
+                    />
+                    <span style={{ fontSize: '13px', color: '#374151', fontWeight: 600 }}>
+                      {option}
+                    </span>
+                  </label>
+                );
+              })}
+
+              {visibleOptions.length === 0 && (
+                <div style={{ fontSize: '12px', color: '#6b7280', padding: '4px 2px' }}>
+                  No matching values.
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -3658,24 +3706,6 @@ export default function App() {
               title="Information"
             >
               i
-            </button>
-
-            <button
-              type="button"
-              onClick={configure}
-              style={{
-                height: '34px',
-                padding: '0 14px',
-                border: '1px solid #d6dee7',
-                borderRadius: '8px',
-                background: '#f7f9fc',
-                color: '#0f172a',
-                fontSize: '12px',
-                fontWeight: 700,
-                cursor: 'pointer'
-              }}
-            >
-              Configure
             </button>
           </div>
         </div>

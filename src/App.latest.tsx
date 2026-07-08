@@ -1362,6 +1362,7 @@ export default function App() {
     setHeaderFilterMenu(null);
     setColumnFilterSearch('');
     setOpenNestedFilterGroups({});
+    setFilterGroupSearch({});
     setDataSourceSearch('');
     setFieldRoleOverrides({});
     setExpandedWorksheetFields({});
@@ -1396,7 +1397,7 @@ export default function App() {
       .map((field) => ({
         label: field.caption,
         field: field.fieldName,
-        options: getFieldDistinctValuesFromRows(loadedRows, field.fieldName).slice(0, 25)
+        options: getFieldDistinctValuesFromRows(loadedRows, field.fieldName)
       }))
       .filter((group) => group.options.length > 0);
   }
@@ -1879,6 +1880,8 @@ export default function App() {
     return buildLevel(filteredRows, 0);
   }, [filteredRows, selectedDimensions, selectedMeasures]);
 
+  const [filterGroupSearch, setFilterGroupSearch] = useState<Record<string, string>>({});
+
   const visibleNodes = useMemo<PivotNode[]>(() => {
     const result: PivotNode[] = [];
 
@@ -1921,7 +1924,7 @@ export default function App() {
     [availableFields, loadedRows, selectedDimensions, filters]
   );
 
-  const infoResults = useMemo<InfoResult[]>(() => {
+    const infoResults = useMemo<InfoResult[]>(() => {
     return infoCalculations.map((calc) => ({
       id: calc.id,
       label: calc.label,
@@ -2057,7 +2060,7 @@ export default function App() {
               minWidth: '420px',
               maxWidth: '760px',
               maxHeight: '560px',
-              overflowY: 'auto',
+              overflowY: 'visible',
               background: '#ffffff',
               border: '1px solid #e6ebf2',
               borderRadius: '18px',
@@ -2084,7 +2087,7 @@ export default function App() {
           type="button"
           onClick={() => setFieldOverride(worksheetName, field.fieldName, 'dimension')}
           style={{
-            minWidth: '132px',
+            minWidth: '86px',
             height: '32px',
             border: '2px solid #222',
             background: isDimension ? '#eef6ff' : '#ffffff',
@@ -2316,7 +2319,11 @@ export default function App() {
                           border: '2px solid #222',
                           borderTop: 'none',
                           background: '#fff',
-                          padding: '14px'
+                          padding: '14px',
+                          maxHeight: '320px',
+                          minHeight: 0,
+                          overflowY: 'auto',
+                          overflowX: 'hidden'
                         }}
                       >
                         <div style={{ display: 'grid', gap: '12px' }}>
@@ -2605,6 +2612,11 @@ export default function App() {
   function renderFilterValueDropdown(group: FilterGroupDefinition) {
     const open = !!openNestedFilterGroups[group.field];
     const selectedCount = filters.find((f) => f.field === group.field)?.values.length || 0;
+    const search = filterGroupSearch[group.field] || '';
+
+    const visibleOptions = group.options.filter((option) =>
+      option.toLowerCase().includes(search.trim().toLowerCase())
+    );
 
     return (
       <div
@@ -2626,7 +2638,10 @@ export default function App() {
             justifyContent: 'space-between',
             color: '#1f2937',
             fontWeight: 600,
-            cursor: 'pointer'
+            cursor: 'pointer',
+            background: 'transparent',
+            border: 'none',
+            padding: 0
           }}
         >
           <span>{group.label}{selectedCount ? ` (${selectedCount})` : ''}</span>
@@ -2634,31 +2649,91 @@ export default function App() {
         </button>
 
         {open && (
-          <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>
-            {group.options.map((option) => {
-              const selected = isFilterValueSelected(group.field, option);
-              return (
-                <label
-                  key={option}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    padding: '8px 10px',
-                    borderRadius: '10px',
-                    background: selected ? '#eef0ff' : '#f5f7fb',
-                    cursor: 'pointer'
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selected}
-                    onChange={() => toggleFilterValue(group.field, option)}
-                  />
-                  <span style={{ fontSize: '13px', color: '#374151', fontWeight: 600 }}>{option}</span>
-                </label>
-              );
-            })}
+          <div
+            style={{
+              marginTop: '10px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              minHeight: 0
+            }}
+          >
+            <input
+              type="text"
+              value={search}
+              onChange={(e) =>
+                setFilterGroupSearch((prev) => ({
+                  ...prev,
+                  [group.field]: e.target.value
+                }))
+              }
+              onKeyDown={(e) => e.stopPropagation()}
+              placeholder={`Search ${group.label}...`}
+              style={{
+                width: '100%',
+                height: '34px',
+                padding: '0 10px',
+                border: '1px solid #d7deea',
+                borderRadius: '8px',
+                fontSize: '13px',
+                background: '#ffffff',
+                color: '#374151',
+                boxSizing: 'border-box'
+              }}
+            />
+
+            <div
+              style={{
+                maxHeight: '240px',
+                minHeight: 0,
+                overflowY: 'auto',
+                overflowX: 'hidden',
+                display: 'grid',
+                gap: '8px',
+                paddingRight: '6px'
+              }}
+            >
+              {visibleOptions.map((option) => {
+                const selected = isFilterValueSelected(group.field, option);
+
+                return (
+                  <label
+                    key={option}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      padding: '8px 10px',
+                      borderRadius: '10px',
+                      background: selected ? '#eef0ff' : '#f5f7fb',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={() => toggleFilterValue(group.field, option)}
+                    />
+                    <span
+                      style={{
+                        fontSize: '13px',
+                        color: '#374151',
+                        fontWeight: 600,
+                        wordBreak: 'break-word'
+                      }}
+                    >
+                      {option}
+                    </span>
+                  </label>
+                );
+              })}
+
+              {visibleOptions.length === 0 && (
+                <div style={{ fontSize: '12px', color: '#6b7280', padding: '4px 2px' }}>
+                  No matching values.
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -2672,38 +2747,8 @@ export default function App() {
           Select Filters
         </div>
 
-        <div style={{ display: 'grid', gap: '16px' }}>
-          {filterDefinitions.map((group) => (
-            <div key={group.field}>
-              <div style={{ fontSize: '13px', fontWeight: 700, color: '#374151', marginBottom: '8px' }}>
-                {group.label}
-              </div>
-
-              {group.options.length > 3 ? (
-                renderFilterValueDropdown(group)
-              ) : (
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-                    gap: '10px'
-                  }}
-                >
-                  {group.options.map((option) => (
-                    <div key={option}>
-                      {renderFieldChip(
-                        option,
-                        null,
-                        isFilterValueSelected(group.field, option),
-                        () => toggleFilterValue(group.field, option),
-                        '#5f5cf1'
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
+        <div style={{ display: 'grid', gap: '12px' }}>
+          {filterDefinitions.map((group) => renderFilterValueDropdown(group))}
 
           {filterDefinitions.length === 0 && (
             <div style={{ color: '#6b7280', fontSize: '13px' }}>
@@ -3810,7 +3855,7 @@ export default function App() {
               i
             </button>
 
-            <button
+            {/* <button
               type="button"
               onClick={configure}
               style={{
@@ -3826,7 +3871,7 @@ export default function App() {
               }}
             >
               Configure
-            </button>
+            </button> */}
           </div>
         </div>
 
