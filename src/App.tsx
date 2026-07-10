@@ -4,6 +4,22 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import exportIcon from './assets/icons/export-icon.png';
 import { Grid } from 'react-window';
+import {
+  DndContext,
+  PointerSensor,
+  KeyboardSensor,
+  closestCenter,
+  useSensor,
+  useSensors
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+  sortableKeyboardCoordinates
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 declare const tableau: any;
 declare const XLSX: any;
@@ -103,6 +119,30 @@ type InfoResult = {
   value: string;
 };
 
+type SortableSelectionPillProps = {
+  id: string;
+  label: string;
+  index: number;
+  total: number;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onEdit?: () => void;
+  onRemove?: () => void;
+};
+
+type SelectionPillProps = {
+  text: string;
+  color?: string;
+  options?: {
+    onRemove?: () => void;
+    onMoveUp?: () => void;
+    onMoveDown?: () => void;
+    onEdit?: () => void;
+    disableMoveUp?: boolean;
+    disableMoveDown?: boolean;
+  };
+};
+
 type WorksheetFieldsMap = Record<string, FieldMeta[]>;
 type FieldRoleOverrideMap = Record<string, Record<string, FieldRole>>;
 type WorksheetFieldExpandMap = Record<string, boolean>;
@@ -177,6 +217,217 @@ function looksNumericType(dataType?: string): boolean {
     lower.includes('numeric') ||
     lower.includes('decimal') ||
     lower.includes('real')
+  );
+}
+
+function SelectionPill({
+  text,
+  color = '#065f73',
+  options
+}: SelectionPillProps) {
+  const {
+    onRemove,
+    onMoveUp,
+    onMoveDown,
+    onEdit,
+    disableMoveUp,
+    disableMoveDown
+  } = options || {};
+
+  const hasActions = !!onMoveUp || !!onMoveDown || !!onEdit || !!onRemove;
+
+  const actionButtonStyle: React.CSSProperties = {
+    width: '18px',
+    height: '18px',
+    minWidth: '18px',
+    borderRadius: '999px',
+    border: 'none',
+    background: 'rgba(255,255,255,0.18)',
+    color: '#fff',
+    fontSize: '11px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 0,
+    lineHeight: 1,
+    opacity: 1
+  };
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '8px',
+        minHeight: '28px',
+        padding: '0 8px 0 12px',
+        borderRadius: '999px',
+        background: color,
+        color: '#fff',
+        fontSize: '12px',
+        fontWeight: 700
+      }}
+    >
+      <span
+        style={{
+          paddingLeft: '15px',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }}
+      >
+        {text}
+      </span>
+
+      {hasActions && (
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '4px',
+            flexShrink: 0
+          }}
+        >
+          {onMoveUp && (
+            <button
+              type="button"
+              onClick={onMoveUp}
+              disabled={disableMoveUp}
+              style={{
+                ...actionButtonStyle,
+                opacity: disableMoveUp ? 0.45 : 1,
+                cursor: disableMoveUp ? 'default' : 'pointer'
+              }}
+              aria-label={`Move ${text} up`}
+            >
+              ↑
+            </button>
+          )}
+
+          {onMoveDown && (
+            <button
+              type="button"
+              onClick={onMoveDown}
+              disabled={disableMoveDown}
+              style={{
+                ...actionButtonStyle,
+                opacity: disableMoveDown ? 0.45 : 1,
+                cursor: disableMoveDown ? 'default' : 'pointer'
+              }}
+              aria-label={`Move ${text} down`}
+            >
+              ↓
+            </button>
+          )}
+
+          {onEdit && (
+            <button
+              type="button"
+              onClick={onEdit}
+              style={actionButtonStyle}
+              aria-label={`Edit label for ${text}`}
+            >
+              ✎
+            </button>
+          )}
+
+          {onRemove && (
+            <button
+              type="button"
+              onClick={onRemove}
+              style={actionButtonStyle}
+              aria-label={`Remove ${text}`}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SortableSelectionPill({
+  id,
+  label,
+  index,
+  total,
+  onMoveUp,
+  onMoveDown,
+  onEdit,
+  onRemove
+}: SortableSelectionPillProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging
+  } = useSortable({ id });
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+        position: 'relative',
+        marginBottom: '8px',
+        opacity: isDragging ? 0.92 : 1,
+        zIndex: isDragging ? 2 : 'auto'
+      }}
+    >
+      <button
+        type="button"
+        ref={setActivatorNodeRef}
+        {...attributes}
+        {...listeners}
+        title="Drag to reorder"
+        aria-label={`Drag to reorder ${label}`}
+        style={{
+          position: 'absolute',
+          left: '8px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          width: '16px',
+          height: '16px',
+          border: 'none',
+          background: 'transparent',
+          color: '#ffffff',
+          cursor: isDragging ? 'grabbing' : 'grab',
+          fontSize: '12px',
+          lineHeight: 1,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 0,
+          userSelect: 'none',
+          zIndex: 3
+        }}
+      >
+        ⋮⋮
+      </button>
+
+      <div>
+        <SelectionPill
+          text={label}
+          color="#065f73"
+          options={{
+            onMoveUp,
+            onMoveDown,
+            onEdit,
+            onRemove,
+            disableMoveUp: index === 0,
+            disableMoveDown: index === total - 1
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -544,6 +795,8 @@ export default function App() {
   const [fieldLabelOverrides, setFieldLabelOverrides] = useState<Record<string, string>>({});
   const [editingFieldLabel, setEditingFieldLabel] = useState<string | null>(null);
   const [editingFieldValue, setEditingFieldValue] = useState('');
+  const [editingFieldFormat, setEditingFieldFormat] = useState('number');
+  const [fieldFormatOverrides, setFieldFormatOverrides] = useState<Record<string, string>>({});
 
   const [worksheetFields, setWorksheetFields] = useState<WorksheetFieldsMap>({});
   const [fieldRoleOverrides, setFieldRoleOverrides] = useState<FieldRoleOverrideMap>({});
@@ -579,6 +832,8 @@ export default function App() {
   const [openNestedFilterGroups, setOpenNestedFilterGroups] = useState<Record<string, boolean>>({});
 
   const fieldMapRef = useRef<WorksheetFieldsMap>({});
+
+  const [fieldFormats, setFieldFormats] = useState<Record<string, string>>({});
 
   const [loadedRows, setLoadedRows] = useState<PreviewRow[]>([]);
   const [totalAvailableRows, setTotalAvailableRows] = useState(0);
@@ -632,7 +887,46 @@ export default function App() {
     height: 0
   });
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 6
+      }
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates
+    })
+  );
 
+  function handleDimensionDragEnd(event: any) {
+    const { active, over } = event;
+
+    if (!over || active.id === over.id) return;
+
+    setSelectedDimensions((prev) => {
+      const oldIndex = prev.indexOf(String(active.id));
+      const newIndex = prev.indexOf(String(over.id));
+
+      if (oldIndex === -1 || newIndex === -1) return prev;
+
+      return arrayMove(prev, oldIndex, newIndex);
+    });
+  }
+
+  function handleMeasureDragEnd(event: any) {
+    const { active, over } = event;
+
+    if (!over || active.id === over.id) return;
+
+    setSelectedMeasures((prev) => {
+      const oldIndex = prev.indexOf(String(active.id));
+      const newIndex = prev.indexOf(String(over.id));
+
+      if (oldIndex === -1 || newIndex === -1) return prev;
+
+      return arrayMove(prev, oldIndex, newIndex);
+    });
+  }
 
   const unregisterHandlersRef = useRef<(() => void)[]>([]);
   const refreshTimerRef = useRef<number | null>(null);
@@ -999,22 +1293,49 @@ export default function App() {
     return layoutSettings.measureWidths[field] || layoutSettings.defaultMeasureWidth;
   }
 
-  function formatMeasureValue(field: string, value: number): string {
-    const fmt = getMeasureFormat(field);
-    let numericValue = value;
+  function formatMeasureValue(field: string, value: number) {
+    const format = fieldFormatOverrides[field] || 'number';
 
-    if (fmt.formatType === 'percent') numericValue = value * 100;
+    switch (format) {
+      case 'currency':
+        return value.toLocaleString(undefined, {
+          style: 'currency',
+          currency: 'USD',
+          maximumFractionDigits: 2
+        });
+      case 'percent':
+        return `${(value * 100).toFixed(1)}%`;
+      case 'integer':
+        return value.toLocaleString(undefined, {
+          maximumFractionDigits: 0
+        });
+      case 'decimal-1':
+        return value.toLocaleString(undefined, {
+          minimumFractionDigits: 1,
+          maximumFractionDigits: 1
+        });
+      case 'decimal-2':
+        return value.toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2
+        });
+      case 'decimal-3':
+        return value.toLocaleString(undefined, {
+          minimumFractionDigits: 3,
+          maximumFractionDigits: 3
+        });
+      case 'number':
+      default:
+        return value.toLocaleString();
+    }
+  }
 
-    const formatted = new Intl.NumberFormat(undefined, {
-      minimumFractionDigits: fmt.decimals,
-      maximumFractionDigits: fmt.decimals,
-      useGrouping: fmt.useThousandsSeparator
-    }).format(numericValue);
+  function getFieldFormat(field: string) {
+    return fieldFormats[field] || 'number';
+  }
 
-    const percentSuffix = fmt.formatType === 'percent' ? '%' : '';
-    const currencyPrefix = fmt.formatType === 'currency' && !fmt.prefix ? '$' : '';
-
-    return `${fmt.prefix || currencyPrefix}${formatted}${percentSuffix}${fmt.suffix}`;
+  function isMeasureField(field: string) {
+    return selectedMeasures.includes(field);
   }
 
   function toggleSort(field: string) {
@@ -1111,6 +1432,7 @@ export default function App() {
   function startEditingFieldLabel(field: string) {
     setEditingFieldLabel(field);
     setEditingFieldValue(getDisplayLabel(field));
+    setEditingFieldFormat(getFieldFormat(field));
   }
 
   function saveFieldLabel(field: string) {
@@ -1127,14 +1449,31 @@ export default function App() {
       return next;
     });
 
+    if (isMeasureField(field)) {
+      setFieldFormatOverrides((prev) => {
+        const next = { ...prev };
+
+        if (!editingFieldFormat || editingFieldFormat === 'number') {
+          delete next[field];
+        } else {
+          next[field] = editingFieldFormat;
+        }
+
+        return next;
+      });
+    }
+
     setEditingFieldLabel(null);
     setEditingFieldValue('');
+    setEditingFieldFormat('number');
   }
 
   function cancelFieldLabelEdit() {
     setEditingFieldLabel(null);
     setEditingFieldValue('');
+    setEditingFieldFormat('number');
   }
+
 
   function flattenVisibleNodes(nodes: TreeNode[], expanded: Record<string, boolean>): VisibleNode[] {
     const result: VisibleNode[] = [];
@@ -2621,129 +2960,7 @@ export default function App() {
     );
   }
 
-  function renderSelectionPill(
-    text: string,
-    color = '#065f73',
-    options?: {
-      onRemove?: () => void;
-      onMoveUp?: () => void;
-      onMoveDown?: () => void;
-      onEdit?: () => void;
-      disableMoveUp?: boolean;
-      disableMoveDown?: boolean;
-    }
-  ) {
-    const {
-      onRemove,
-      onMoveUp,
-      onMoveDown,
-      onEdit,
-      disableMoveUp,
-      disableMoveDown
-    } = options || {};
-
-    const hasActions = !!onMoveUp || !!onMoveDown || !!onEdit || !!onRemove;
-
-    const actionButtonStyle: React.CSSProperties = {
-      width: '18px',
-      height: '18px',
-      minWidth: '18px',
-      borderRadius: '999px',
-      border: 'none',
-      background: 'rgba(255,255,255,0.18)',
-      color: '#fff',
-      fontSize: '11px',
-      fontWeight: 700,
-      cursor: 'pointer',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: 0,
-      lineHeight: 1,
-      opacity: 1
-    };
-
-    return (
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '8px',
-          minHeight: '28px',
-          padding: '0 8px 0 12px',
-          borderRadius: '999px',
-          background: color,
-          color: '#fff',
-          fontSize: '12px',
-          fontWeight: 700,
-          marginBottom: '8px'
-        }}
-      >
-        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {text}
-        </span>
-
-        {hasActions && (
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
-            {onMoveUp && (
-              <button
-                type="button"
-                onClick={onMoveUp}
-                disabled={disableMoveUp}
-                style={{
-                  ...actionButtonStyle,
-                  opacity: disableMoveUp ? 0.45 : 1,
-                  cursor: disableMoveUp ? 'default' : 'pointer'
-                }}
-                aria-label={`Move ${text} up`}
-              >
-                ↑
-              </button>
-            )}
-
-            {onMoveDown && (
-              <button
-                type="button"
-                onClick={onMoveDown}
-                disabled={disableMoveDown}
-                style={{
-                  ...actionButtonStyle,
-                  opacity: disableMoveDown ? 0.45 : 1,
-                  cursor: disableMoveDown ? 'default' : 'pointer'
-                }}
-                aria-label={`Move ${text} down`}
-              >
-                ↓
-              </button>
-            )}
-
-            {onEdit && (
-              <button
-                type="button"
-                onClick={onEdit}
-                style={actionButtonStyle}
-                aria-label={`Edit label for ${text}`}
-              >
-                ✎
-              </button>
-            )}
-
-            {onRemove && (
-              <button
-                type="button"
-                onClick={onRemove}
-                style={actionButtonStyle}
-                aria-label={`Remove ${text}`}
-              >
-                ×
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
+  
 
   function renderPivotTable() {
     return (
@@ -3357,6 +3574,44 @@ export default function App() {
               autoFocus
             />
 
+            {isMeasureField(editingFieldLabel) && (
+              <div style={{ marginBottom: '12px' }}>
+                <div
+                  style={{
+                    fontSize: '12px',
+                    color: '#64748b',
+                    marginBottom: '6px',
+                    fontWeight: 600
+                  }}
+                >
+                  Metric Format
+                </div>
+
+                <select
+                  value={editingFieldFormat}
+                  onChange={(e) => setEditingFieldFormat(e.target.value)}
+                  style={{
+                    width: '100%',
+                    height: '36px',
+                    border: '1px solid #d7dfea',
+                    borderRadius: '8px',
+                    padding: '0 10px',
+                    fontSize: '12px',
+                    background: '#fff',
+                    boxSizing: 'border-box'
+                  }}
+                >
+                  <option value="number">Number</option>
+                  <option value="currency">Currency</option>
+                  <option value="percent">Percent</option>
+                  <option value="integer">Whole Number</option>
+                  <option value="decimal-1">1 Decimal</option>
+                  <option value="decimal-2">2 Decimals</option>
+                  <option value="decimal-3">3 Decimals</option>
+                </select>
+              </div>
+            )}            
+
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
               <button
                 type="button"
@@ -3927,44 +4182,18 @@ export default function App() {
                   <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
                     Data Source(s):
                   </div>
-                  {selectedSources.length > 0
-                    ? selectedSources.map((source) => (
-                        <div key={source}>
-                          {renderSelectionPill(
-                            source,
-                            '#065f73',
-                            selectedSources.length > 1 ? { onRemove: () => toggleSource(source) } : undefined
-                          )}
-                        </div>
-                      ))
-                    : <div style={{ fontSize: '12px', color: '#94a3b8' }}>None selected</div>}
-                </div>
-
-                <div style={{ marginBottom: '14px' }}>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
-                    Date Range:
-                  </div>
-                  {(dateRange.start || dateRange.end)
-                    ? renderSelectionPill(`${dateRange.start || '...'} - ${dateRange.end || '...'}`, '#065f73')
-                    : <div style={{ fontSize: '12px', color: '#94a3b8' }}>Not set</div>}
-                </div>
-
-                <div style={{ marginBottom: '14px' }}>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
-                    Dimensions:
-                  </div>
-
-                  {selectedDimensions.length > 0 ? (
-                    selectedDimensions.map((field, index) => (
-                      <div key={field}>
-                        {renderSelectionPill(getDisplayLabel(field), '#065f73', {
-                          onMoveUp: () => moveDimension(field, 'up'),
-                          onMoveDown: () => moveDimension(field, 'down'),
-                          onEdit: () => startEditingFieldLabel(field),
-                          onRemove: () => toggleDimension(field),
-                          disableMoveUp: index === 0,
-                          disableMoveDown: index === selectedDimensions.length - 1
-                        })}
+                  {selectedSources.length > 0 ? (
+                    selectedSources.map((source) => (
+                      <div key={source} style={{ marginBottom: '8px' }}>
+                        <SelectionPill
+                          text={source}
+                          color="#065f73"
+                          options={
+                            selectedSources.length > 1
+                              ? { onRemove: () => toggleSource(source) }
+                              : undefined
+                          }
+                        />
                       </div>
                     ))
                   ) : (
@@ -3974,22 +4203,86 @@ export default function App() {
 
                 <div style={{ marginBottom: '14px' }}>
                   <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
-                    Metrics:
+                    Date Range:
+                  </div>
+                  {dateRange.start || dateRange.end ? (
+                    <SelectionPill
+                      text={`${dateRange.start || '...'} - ${dateRange.end || '...'}`}
+                      color="#065f73"
+                    />
+                  ) : (
+                    <div style={{ fontSize: '12px', color: '#94a3b8' }}>Not set</div>
+                  )}
+                </div>
+
+                <div style={{ marginBottom: '14px' }}>
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
+                    Dimensions:
                   </div>
 
+                  {selectedDimensions.length > 0 ? (
+                    <DndContext
+                      sensors={sensors}
+                      collisionDetection={closestCenter}
+                      onDragEnd={handleDimensionDragEnd}
+                    >
+                      <SortableContext
+                        items={selectedDimensions}
+                        strategy={verticalListSortingStrategy}
+                      >
+                        <div>
+                          {selectedDimensions.map((field, index) => (
+                            <SortableSelectionPill
+                              key={field}
+                              id={field}
+                              label={getDisplayLabel(field)}
+                              index={index}
+                              total={selectedDimensions.length}
+                              onMoveUp={() => moveDimension(field, 'up')}
+                              onMoveDown={() => moveDimension(field, 'down')}
+                              onEdit={() => startEditingFieldLabel(field)}
+                              onRemove={() => toggleDimension(field)}
+                            />
+                          ))}
+                        </div>
+                      </SortableContext>
+                    </DndContext>
+                  ) : (
+                    <div style={{ fontSize: 12, color: '#94a3b8' }}>No dimensions selected</div>
+                  )}
+                </div>
+
+                <div style={{ marginBottom: '14px' }}>
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
+                    Selected Measures:
+                  </div>
                   {selectedMeasures.length > 0 ? (
-                    selectedMeasures.map((field, index) => (
-                      <div key={field}>
-                        {renderSelectionPill(getDisplayLabel(field), '#065f73', {
-                          onMoveUp: () => moveMeasure(field, 'up'),
-                          onMoveDown: () => moveMeasure(field, 'down'),
-                          onEdit: () => startEditingFieldLabel(field),
-                          onRemove: () => toggleMeasure(field),
-                          disableMoveUp: index === 0,
-                          disableMoveDown: index === selectedMeasures.length - 1
-                        })}
-                      </div>
-                    ))
+                    <DndContext
+                      sensors={sensors}
+                      collisionDetection={closestCenter}
+                      onDragEnd={handleMeasureDragEnd}
+                    >
+                      <SortableContext
+                        items={selectedMeasures}
+                        strategy={verticalListSortingStrategy}
+                      >
+                        <div>
+                          {selectedMeasures.map((field, index) => (
+                            <SortableSelectionPill
+                              key={field}
+                              id={field}
+                              label={getDisplayLabel(field)}
+                              index={index}
+                              total={selectedMeasures.length}
+                              onMoveUp={() => moveMeasure(field, 'up')}
+                              onMoveDown={() => moveMeasure(field, 'down')}
+                              onEdit={() => startEditingFieldLabel(field)}
+                              onRemove={() => toggleMeasure(field)}
+                            />
+                          ))}
+                        </div>
+                      </SortableContext>
+                    </DndContext>
                   ) : (
                     <div style={{ fontSize: '12px', color: '#94a3b8' }}>None selected</div>
                   )}
@@ -3999,18 +4292,23 @@ export default function App() {
                   <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', marginBottom: '8px' }}>
                     Active Filters:
                   </div>
-                  {filters.length > 0
-                    ? filters.map((filter) => (
-                        <div key={filter.field}>
-                          {renderSelectionPill(
-                            `${getDisplayLabel(filter.field)}: ${filter.values.join(', ')}`,
-                            '#065f73',
-                            { onRemove: () => removeFilter(filter.field) }
-                          )}
-                        </div>
-                      ))
-                    : <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '12px' }}>None applied</div>}
+                  {filters.length > 0 ? (
+                    filters.map((filter) => (
+                      <div key={filter.field} style={{ marginBottom: '8px' }}>
+                        <SelectionPill
+                          text={`${getDisplayLabel(filter.field)}: ${filter.values.join(', ')}`}
+                          color="#065f73"
+                          options={{ onRemove: () => removeFilter(filter.field) }}
+                        />
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '12px' }}>
+                      None applied
+                    </div>
+                  )}
                 </div>
+
 
                 <button
                   type="button"
